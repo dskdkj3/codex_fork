@@ -71,6 +71,7 @@ use codex_config::types::TuiPetAnchor;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
+use codex_features::ContextManagementBackend;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
@@ -715,6 +716,47 @@ auto_compact_fallback_buffer_tokens = 8000
         }
         assert_eq!(config.token_budget, expected);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_resolves_context_management_backend() -> std::io::Result<()> {
+    for (config_text, expected) in [
+        ("", ContextManagementBackend::Codex),
+        (
+            "features.context_management = true\n",
+            ContextManagementBackend::Codex,
+        ),
+        (
+            "[features.context_management]\nbackend = \"codex\"\n",
+            ContextManagementBackend::Codex,
+        ),
+        (
+            "[features.context_management]\nbackend = \"local\"\n",
+            ContextManagementBackend::Local,
+        ),
+    ] {
+        let codex_home = tempdir()?;
+        let config_toml: ConfigToml =
+            toml::from_str(config_text).expect("TOML deserialization should succeed");
+        let config = Config::load_from_base_config_with_overrides(
+            config_toml,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(
+            config.context_management_backend, expected,
+            "{config_text:?}"
+        );
+    }
+
+    assert!(
+        toml::from_str::<ConfigToml>("[features.context_management]\nbackend = \"unsupported\"\n")
+            .is_err()
+    );
+
     Ok(())
 }
 

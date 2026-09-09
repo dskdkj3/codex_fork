@@ -62,6 +62,7 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
 use codex_exec_server::ReadFileOptions;
 use codex_features::CodeModeConfigToml;
+use codex_features::ContextManagementBackend;
 use codex_features::CurrentTimeReminderConfigToml;
 use codex_features::CurrentTimeReminderDeliveryMode;
 use codex_features::CurrentTimeSource;
@@ -1046,6 +1047,9 @@ pub struct Config {
 
     /// Context-window token budget configuration, when enabled.
     pub token_budget: Option<TokenBudgetConfig>,
+    /// Selected context-management backend. This is parsed configuration state only; runtime
+    /// backend activation is implemented separately.
+    pub context_management_backend: ContextManagementBackend,
     /// Shared token budget for the root thread and its sub-agents.
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
@@ -3694,6 +3698,15 @@ impl Config {
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
+        let context_management_backend = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.context_management.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.backend,
+            })
+            .unwrap_or_default();
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
         let sleep_tool_mode = cfg
@@ -4301,6 +4314,7 @@ impl Config {
             ghost_snapshot,
             multi_agent_v2,
             token_budget,
+            context_management_backend,
             rollout_budget,
             current_time_reminder,
             sleep_tool_mode,

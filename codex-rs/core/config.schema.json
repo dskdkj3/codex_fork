@@ -1142,9 +1142,35 @@
       },
       "type": "object"
     },
+    "ContextManagementBackend": {
+      "oneOf": [
+        {
+          "description": "Use the official Codex backend and its existing eligibility checks.",
+          "enum": [
+            "codex"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Keep context-management state in the local Codex thread store.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ContextManagementConfigToml": {
       "additionalProperties": false,
       "properties": {
+        "backend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ContextManagementBackend"
+            }
+          ],
+          "description": "Selects the context-management state backend. The default preserves the official backend."
+        },
         "experimental_mode": {
           "description": "Enables experimental context management.",
           "type": "boolean"

@@ -293,12 +293,25 @@ impl FeatureConfig for MultiAgentV2ConfigToml {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManagementBackend {
+    /// Use the official Codex backend and its existing eligibility checks.
+    #[default]
+    Codex,
+    /// Keep context-management state in the local Codex thread store.
+    Local,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextManagementConfigToml {
     /// Enables experimental context management.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub experimental_mode: Option<bool>,
+    /// Selects the context-management state backend. The default preserves the official backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ContextManagementBackend>,
 }
 
 impl FeatureConfig for ContextManagementConfigToml {

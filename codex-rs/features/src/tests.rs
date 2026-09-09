@@ -151,6 +151,42 @@ fn code_mode_host_feature_config_preserves_boolean_toggle() {
 }
 
 #[test]
+fn context_management_feature_config_deserializes_backend() {
+    let default_config: FeaturesToml = toml::from_str("context_management = true")
+        .expect("boolean context-management feature should deserialize");
+    assert_eq!(
+        default_config.context_management,
+        Some(FeatureToml::Enabled(true))
+    );
+
+    let codex_config: FeaturesToml =
+        toml::from_str("[context_management]\nexperimental_mode = true\nbackend = \"codex\"\n")
+            .expect("codex backend should deserialize");
+    assert_eq!(
+        codex_config.context_management,
+        Some(FeatureToml::Config(crate::ContextManagementConfigToml {
+            experimental_mode: Some(true),
+            backend: Some(crate::ContextManagementBackend::Codex),
+        }))
+    );
+
+    let local_config: FeaturesToml = toml::from_str("[context_management]\nbackend = \"local\"\n")
+        .expect("local backend should deserialize");
+    assert_eq!(
+        local_config.context_management,
+        Some(FeatureToml::Config(crate::ContextManagementConfigToml {
+            experimental_mode: None,
+            backend: Some(crate::ContextManagementBackend::Local),
+        }))
+    );
+
+    assert!(
+        toml::from_str::<FeaturesToml>("[context_management]\nbackend = \"unsupported\"\n")
+            .is_err()
+    );
+}
+
+#[test]
 fn guardian_v2_feature_config_preserves_boolean_toggle() {
     let features: FeaturesToml =
         toml::from_str("guardianv2 = true").expect("Guardian v2 boolean should deserialize");
