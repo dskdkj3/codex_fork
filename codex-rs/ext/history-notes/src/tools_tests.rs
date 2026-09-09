@@ -7,7 +7,67 @@ use codex_tools::ToolPayload;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
+use super::HistoryNotesAction;
 use super::HistoryNotesToolOutput;
+
+#[test]
+fn local_outputs_keep_originals_out_of_hooks_and_diagnostic_logs() {
+    let original = json!({"text": "private-note-and-history-sentinel"});
+    let mut output = HistoryNotesToolOutput::new(original.clone()).unwrap();
+    output.redact_observers = true;
+    let payload = ToolPayload::Function {
+        arguments: original.to_string(),
+    };
+    let metadata = json!({"local_context_private": true});
+    assert_eq!(output.log_output(), metadata.to_string());
+    assert_eq!(output.post_tool_use_input(&payload), Some(metadata.clone()));
+    assert_eq!(
+        output.post_tool_use_response("private-call", &payload),
+        Some(metadata)
+    );
+    assert_eq!(
+        output.to_response_item("private-call", &payload),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "private-call".to_string(),
+            output: FunctionCallOutputPayload::from_text(original.to_string()),
+        }
+    );
+}
+
+#[test]
+fn local_schema_preserves_plaintext_and_official_schema_encryption() {
+    for (action, field) in [
+        (HistoryNotesAction::HistorySearchContents, "query"),
+        (HistoryNotesAction::NotesSearchContents, "query"),
+        (HistoryNotesAction::NotesWriteFile, "text"),
+        (HistoryNotesAction::NotesAppendToFile, "text"),
+    ] {
+        let official = action.parameters();
+        let local = action.local_parameters();
+        assert_eq!(official["properties"][field]["encrypted"], true);
+        assert_eq!(local["properties"][field].get("encrypted"), None);
+        assert_eq!(local["required"], official["required"]);
+        codex_extension_api::parse_tool_input_schema(&local).unwrap();
+    }
+}
+
+#[test]
+fn note_input_limits_survive_native_schema_parsing() {
+    for action in [
+        HistoryNotesAction::NotesWriteFile,
+        HistoryNotesAction::NotesAppendToFile,
+    ] {
+        let schema =
+            codex_extension_api::parse_tool_input_schema(&action.local_parameters()).unwrap();
+        let rendered = serde_json::to_value(schema).unwrap();
+        let description = rendered["properties"]["text"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("3000 UTF-8 bytes per call"));
+        assert!(description.contains("4000 bytes"));
+        assert!(description.contains("aggregate limit"));
+    }
+}
 
 #[test]
 fn preserves_encrypted_history_output() {

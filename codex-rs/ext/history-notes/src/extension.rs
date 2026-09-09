@@ -14,13 +14,18 @@ use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
+use codex_features::ContextManagementBackend;
+use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
+use codex_thread_store::ThreadStore;
 use codex_utils_output_truncation::TruncationPolicy;
 use serde_json::json;
 
 use crate::backend::HistoryNotesBackend;
+use crate::local::LocalHistoryNotesStore;
 use crate::tools::HistoryNotesAction;
 use crate::tools::HistoryNotesTool;
 
@@ -41,6 +46,32 @@ struct HistoryNotesAgentIdentity {
 
 impl HistoryNotesExtension {
     fn update_config(&self, thread_store: &ExtensionData, config: &Config) {
+        if config.context_management_backend == ContextManagementBackend::Local {
+            if config.features.enabled(Feature::ContextManagement)
+                && config
+                    .token_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.use_history_notes_extension)
+                && let Some(store) = thread_store.get::<Arc<dyn ThreadStore>>()
+                && let Some(identity) = thread_store.get::<HistoryNotesAgentIdentity>()
+                && let Ok(thread_id) = ThreadId::from_string(thread_store.level_id())
+            {
+                thread_store.insert(HistoryNotesExtensionConfig {
+                    backend: HistoryNotesBackend::local(LocalHistoryNotesStore::new(
+                        Arc::clone(store.as_ref()),
+                        thread_id,
+                        identity.agent_name.clone(),
+                        config
+                            .codex_home
+                            .join("context-management-local")
+                            .to_path_buf(),
+                    )),
+                });
+            } else {
+                thread_store.remove::<HistoryNotesExtensionConfig>();
+            }
+            return;
+        }
         if config
             .token_budget
             .as_ref()
@@ -159,7 +190,7 @@ impl ToolContributor for HistoryNotesExtension {
     }
 }
 
-/// Installs the standalone history and notes tools backed by the Codex backend.
+/// Installs history and notes tools using the configured backend.
 pub fn install(registry: &mut ExtensionRegistryBuilder<Config>, auth_manager: Arc<AuthManager>) {
     let extension = Arc::new(HistoryNotesExtension { auth_manager });
     registry.thread_lifecycle_contributor(extension.clone());

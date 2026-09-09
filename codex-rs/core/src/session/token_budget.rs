@@ -9,6 +9,7 @@ use codex_login::CodexAuth;
 use codex_protocol::account::PlanType;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::protocol::SessionSource;
 
 fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {
     auth_mode == AuthMode::Chatgpt
@@ -21,7 +22,11 @@ fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanT
 pub(super) fn apply_experimental_context(
     config: &mut Config,
     auth: Option<&CodexAuth>,
+    source: &SessionSource,
 ) -> std::io::Result<()> {
+    if config.context_management_backend == codex_features::ContextManagementBackend::Local {
+        return super::local_context::activate(config, source);
+    }
     let provider = &config.model_provider;
     if !config.features.enabled(Feature::ContextManagement)
         || !provider.supports_codex_backend_routes()

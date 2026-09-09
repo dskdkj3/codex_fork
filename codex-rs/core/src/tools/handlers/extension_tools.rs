@@ -417,6 +417,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_context_hooks_remain_present_without_private_arguments_or_results() {
+        let handler = ExtensionToolAdapter::new(Arc::new(StubExtensionExecutor));
+        let (session, mut turn) = crate::session::tests::make_session_and_context().await;
+        let config = Arc::make_mut(&mut turn.config);
+        config.context_management_backend = codex_features::ContextManagementBackend::Local;
+        config
+            .features
+            .enable(codex_features::Feature::ContextManagement)
+            .unwrap();
+        let turn = Arc::new(turn);
+        let original = json!({"text": "private-note-sentinel"}).to_string();
+        let invocation = ToolInvocation {
+            session: session.into(),
+            step_context: StepContext::for_test(Arc::clone(&turn)),
+            turn,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+            call_id: "private-call".to_string(),
+            tool_name: codex_tools::ToolName::namespaced("notes", "write_file"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: original.clone(),
+            },
+        };
+        let output = codex_tools::JsonToolOutput::new(json!({"text": "private-result-sentinel"}));
+        let metadata = json!({"local_context_private": true});
+        assert_eq!(
+            CoreToolRuntime::pre_tool_use_payload(&handler, &invocation)
+                .unwrap()
+                .tool_input,
+            metadata
+        );
+        let post = CoreToolRuntime::post_tool_use_payload(&handler, &invocation, &output).unwrap();
+        assert_eq!(post.tool_input, metadata);
+        assert_eq!(post.tool_response, metadata);
+        assert_eq!(
+            crate::tools::local_context_privacy::log_payload(&invocation),
+            metadata.to_string()
+        );
+        let preserved =
+            CoreToolRuntime::with_updated_hook_input(&handler, invocation.clone(), metadata)
+                .unwrap();
+        let ToolPayload::Function { arguments } = preserved.payload else {
+            panic!("function input");
+        };
+        assert_eq!(arguments, original);
+        assert!(
+            CoreToolRuntime::with_updated_hook_input(
+                &handler,
+                invocation,
+                json!({"text": "replacement"})
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn passes_turn_fields_and_scoped_turn_item_emitter_to_extension_call() {
         let captured_call = Arc::new(Mutex::new(None));
         let captured_sandbox_cwds = Arc::new(Mutex::new(Vec::new()));

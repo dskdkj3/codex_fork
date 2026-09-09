@@ -224,6 +224,7 @@ pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
 mod input_queue;
+mod local_context;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -683,7 +684,11 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let auth = auth_manager.auth_cached();
-        token_budget::apply_experimental_context(Arc::make_mut(&mut config), auth.as_ref())?;
+        token_budget::apply_experimental_context(
+            Arc::make_mut(&mut config),
+            auth.as_ref(),
+            &session_source,
+        )?;
         // Intentionally resolve `enabled` and `use_history_notes_extension` only at
         // thread startup. Both activation flags stay fixed for this thread runtime,
         // even if the selected model changes later.

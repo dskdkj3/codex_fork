@@ -626,6 +626,8 @@ impl Session {
                 .token_budget
                 .as_ref()
                 .is_some_and(|config| config.use_history_notes_extension)
+                .then_some(turn_context.config.context_management_backend)
+                .is_some_and(|backend| backend == codex_features::ContextManagementBackend::Codex)
                 .then_some(true),
             forked_from_ordinal_exclusive: self
                 .forked_from_ordinal_exclusive
@@ -771,6 +773,12 @@ impl Session {
                 ));
             }
         };
+        super::local_context::prepare(
+            &config,
+            &initial_history,
+            &session_configuration.session_source,
+            thread_id,
+        )?;
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -832,6 +840,9 @@ impl Session {
         thread_extension_init.insert(codex_extension_api::ThreadOriginator(
             session_configuration.originator.clone(),
         ));
+        if super::local_context::enabled(&config) {
+            thread_extension_init.insert(Arc::clone(&thread_store));
+        }
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),

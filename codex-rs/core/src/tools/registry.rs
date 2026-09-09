@@ -23,7 +23,7 @@ use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::lifecycle::notify_tool_finish;
 use crate::tools::lifecycle::notify_tool_start;
-use crate::tools::router::tool_log_payload;
+use crate::tools::local_context_privacy;
 use crate::tools::tool_dispatch_trace::ToolDispatchTrace;
 use crate::util::error_or_panic;
 use codex_analytics::ControlToolCallStatus;
@@ -101,6 +101,15 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
             return None;
         };
 
+        if let Some(metadata) = local_context_privacy::hook_input(invocation) {
+            return Some(PostToolUsePayload {
+                tool_name: function_hook_tool_name(invocation),
+                tool_use_id: result.post_tool_use_id(&invocation.call_id),
+                tool_input: metadata.clone(),
+                tool_response: metadata,
+            });
+        }
+
         Some(PostToolUsePayload {
             tool_name: function_hook_tool_name(invocation),
             tool_use_id: result.post_tool_use_id(&invocation.call_id),
@@ -133,7 +142,8 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
 
         Some(PreToolUsePayload {
             tool_name: function_hook_tool_name(invocation),
-            tool_input: function_hook_tool_input(arguments),
+            tool_input: local_context_privacy::hook_input(invocation)
+                .unwrap_or_else(|| function_hook_tool_input(arguments)),
         })
     }
 
@@ -146,6 +156,15 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         invocation: ToolInvocation,
         updated_input: Value,
     ) -> Result<ToolInvocation, FunctionCallError> {
+        if let Some(metadata) = local_context_privacy::hook_input(&invocation) {
+            return if updated_input == metadata {
+                Ok(invocation)
+            } else {
+                Err(FunctionCallError::RespondToModel(
+                    "Hooks may block local context tools, but cannot rewrite their private arguments.".to_string(),
+                ))
+            };
+        }
         let ToolPayload::Function { .. } = &invocation.payload else {
             return Err(FunctionCallError::RespondToModel(
                 "hook input rewrite received unsupported function tool payload".to_string(),
@@ -517,7 +536,7 @@ impl ToolRegistry {
             Some(tool) => tool,
             None => {
                 let message = unsupported_tool_call_message(&invocation.payload, &tool_name);
-                let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+                let log_payload = local_context_privacy::log_payload(&invocation);
                 let mut tool_result_tags = Vec::with_capacity(2);
                 sandbox_tags.append_metric_tags(&mut tool_result_tags);
                 otel.tool_result_with_tags(
@@ -548,7 +567,7 @@ impl ToolRegistry {
         }
         if !tool.matches_kind(&invocation.payload) {
             let message = format!("tool {tool_name} invoked with incompatible payload");
-            let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+            let log_payload = local_context_privacy::log_payload(&invocation);
             otel.tool_result_with_tags(
                 &tool_name,
                 &call_id_owned,
@@ -641,7 +660,7 @@ impl ToolRegistry {
             tool_result_tags.push(("command_category", category));
         }
 
-        let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+        let log_payload = local_context_privacy::log_payload(&invocation);
 
         let result = otel
             .log_tool_result_with_tags(
