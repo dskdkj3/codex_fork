@@ -55,6 +55,7 @@ sourcePackage.overrideAttrs (old: {
     openssl
     libcap
     ncurses
+    stdenv.cc.cc.libgcc
   ];
   env = (old.env or { }) // {
     RUSTY_V8_ARCHIVE = v8Archive;
