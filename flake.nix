@@ -9,7 +9,13 @@
     };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, ... }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -27,25 +33,30 @@
       # When building from a release commit the Cargo.toml already carries the
       # real version (e.g. "0.101.0").  On the main branch it is the placeholder
       # "0.0.0", so we fall back to a dev version derived from the flake source.
-      version =
-        if cargoVersion != "0.0.0"
-        then cargoVersion
-        else "0.0.0-dev+${self.shortRev or "dirty"}";
+      version = if cargoVersion != "0.0.0" then cargoVersion else "0.0.0-dev+${self.shortRev or "dirty"}";
     in
     {
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          codex-rs = pkgs.callPackage ./codex-rs {
+          sourcePackage = pkgs.callPackage ./codex-rs {
             inherit version;
             rustPlatform = pkgs.makeRustPlatform {
-              cargo = pkgs.rust-bin.stable.latest.minimal;
-              rustc = pkgs.rust-bin.stable.latest.minimal;
+              cargo = pkgs.rust-bin.stable."1.97.1".minimal;
+              rustc = pkgs.rust-bin.stable."1.97.1".minimal;
             };
           };
+          codex-rs =
+            if system == "x86_64-linux" then
+              pkgs.callPackage ./nix/local-package.nix {
+                inherit sourcePackage;
+              }
+            else
+              sourcePackage;
         in
         {
           codex-rs = codex-rs;
@@ -53,14 +64,18 @@
         }
       );
 
-      devShells = forAllSystems (system:
+      devShells = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
           rust = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [ "rust-src" "rust-analyzer" ];
+            extensions = [
+              "rust-src"
+              "rust-analyzer"
+            ];
           };
         in
         {
