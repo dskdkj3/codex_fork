@@ -1,4 +1,4 @@
-# Local context backend (fork milestone one)
+# Local context backend
 
 This fork is based on `rust-v0.153.2` (`657a993cbee87acf52d14b758ce49dbd46d1b8eb`).
 It adds a local backend to the existing experimental context-management tools.
@@ -20,6 +20,17 @@ backend = "local"
 The default preserves the upstream backend's provider and account eligibility
 checks. Selecting `local` does not grant access to any official backend service
 or change the inference provider.
+
+When a launcher creates temporary Codex homes, set the optional fork-only
+`local_store_dir` in the same `[features.context_management]` table to an
+absolute, normalized directory owned by the user. It replaces the default
+`CODEX_HOME/context-management-local` root for both notes and backend markers.
+All path components must be real directories, without symlinks or `.` / `..`
+components. New local threads create missing directories privately; resumed
+threads require an existing compatible record. Reuse the same explicit root
+with the native saved rollout when resuming in a different Codex home. This
+setting does not select or broaden the history source, and does not migrate
+existing state automatically.
 
 Local mode enables the native token-budget and history-notes integration for
 the root thread. Explicitly disabling token-budget or its history-notes
@@ -61,11 +72,22 @@ when moving a Codex home. Ordinary native children, ephemeral threads, and
 inherited fork history are outside this milestone's local activation support.
 Model changes within an activated thread retain the selected recovery backend.
 
-The NixOS runner currently uses temporary runtime homes. Production integration
-must explicitly preserve this local store and pin a tested fork package before
-enabling the example in an ordinary runner session. Milestone one does not
-replace installed packages, update production flake inputs, publish a GitHub
-fork, or invoke a real model account.
+Production launchers must select a durable local store and pin a tested fork
+package before enabling the example in ordinary sessions. The synthetic tests
+also cover recovering original user/tool text and notes with different Codex
+homes sharing one explicitly configured store.
+
+## Nix package
+
+The `packages.x86_64-linux.codex-rs` and `default` outputs use pinned Rust 1.97.1
+and the upstream canonical package assembler. CLI, code-mode host and bwrap are
+built together; V8 inputs and upstream zsh/rg resources have fixed hashes.
+The packaged zsh is adapted with Nix's ELF interpreter/RPATH fixup. All required
+components live under the canonical package root, including `codex-package.json`.
+Other platforms retain the upstream source recipe and are not covered by this
+Linux package's acceptance. Nix evaluation alone does not establish a working
+package: require a completed build and actual CLI/app-server/code-mode smoke
+checks before publishing or consuming it.
 
 ## Maintaining the fork
 
@@ -76,12 +98,10 @@ rollout decoding and extension tool schemas, then run the affected tests and
 package smoke checks. Publish or consume a candidate only after its recovery
 tests pass. Keep the previous immutable package available for rollback.
 
-The first candidate reuses upstream's `just assemble-codex-package` builder. Its
-local verification uses Rust 1.97.1 with a pinned Nix development environment;
-it does not establish that the untouched upstream pure-Nix source derivation
-works. The upstream Nix lock selects an older Rust toolchain, and the local
-baseline needed an explicit fixed hash for the `microsoft/mxc` Git dependency.
-Those packaging changes remain separate from the context backend patches.
+The original local candidate reused upstream's `just assemble-codex-package`
+builder with Rust 1.97.1. The Nix package now pins that same compiler, retains
+the explicit `microsoft/mxc` Git dependency hash and supplies the complete
+resource set. Keep packaging changes separate from context backend patches.
 
 There is no need to decide on a second packaging-repository fork to test this
 source candidate. Distribution, repository visibility and production consumer
