@@ -61,10 +61,7 @@ impl HistoryNotesExtension {
                         Arc::clone(store.as_ref()),
                         thread_id,
                         identity.agent_name.clone(),
-                        config
-                            .codex_home
-                            .join("context-management-local")
-                            .to_path_buf(),
+                        config.context_management_local_store_dir.to_path_buf(),
                     )),
                 });
             } else {

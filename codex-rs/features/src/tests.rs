@@ -167,6 +167,7 @@ fn context_management_feature_config_deserializes_backend() {
         Some(FeatureToml::Config(crate::ContextManagementConfigToml {
             experimental_mode: Some(true),
             backend: Some(crate::ContextManagementBackend::Codex),
+            local_store_dir: None,
         }))
     );
 
@@ -177,6 +178,7 @@ fn context_management_feature_config_deserializes_backend() {
         Some(FeatureToml::Config(crate::ContextManagementConfigToml {
             experimental_mode: None,
             backend: Some(crate::ContextManagementBackend::Local),
+            local_store_dir: None,
         }))
     );
 

@@ -312,6 +312,10 @@ pub struct ContextManagementConfigToml {
     /// Selects the context-management state backend. The default preserves the official backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<ContextManagementBackend>,
+    /// Optional absolute, normalized directory for local notes and recovery markers. Defaults to
+    /// CODEX_HOME/context-management-local. Does not change the native history source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_store_dir: Option<std::path::PathBuf>,
 }
 
 impl FeatureConfig for ContextManagementConfigToml {

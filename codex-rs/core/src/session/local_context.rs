@@ -111,9 +111,23 @@ pub(super) fn prepare(
             "local context does not support inherited fork history",
         ));
     }
-    let root = config.codex_home.join("context-management-local");
+    let root = config.context_management_local_store_dir.as_path();
     let thread_root = root.join(thread_id.to_string());
-    for directory in [&root, &thread_root] {
+    // Validate every ancestor before creating an explicitly selected local directory. Ordinary
+    // official resumes retain the original root/marker-only compatibility check.
+    let directories = if local {
+        root.ancestors()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    } else {
+        vec![root]
+    };
+    for directory in directories
+        .into_iter()
+        .chain(std::iter::once(thread_root.as_path()))
+    {
         match fs::symlink_metadata(directory) {
             Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
                 return Err(io::Error::other("invalid local context directory"));

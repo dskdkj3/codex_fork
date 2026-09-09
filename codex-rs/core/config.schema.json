@@ -1174,6 +1174,10 @@
         "experimental_mode": {
           "description": "Enables experimental context management.",
           "type": "boolean"
+        },
+        "local_store_dir": {
+          "description": "Optional absolute, normalized directory for local notes and recovery markers. Defaults to CODEX_HOME/context-management-local. Does not change the native history source.",
+          "type": "string"
         }
       },
       "type": "object"

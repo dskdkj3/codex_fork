@@ -53,6 +53,29 @@ fn configure_local(config: &mut Config) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_history_recovers_omitted_originals_after_new_context_and_resume() -> TestResult {
+    exercise_local_history_recovery(RecoveryHome::Same).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_history_and_notes_survive_resume_in_a_different_home() -> TestResult {
+    exercise_local_history_recovery(RecoveryHome::Different).await
+}
+
+enum RecoveryHome {
+    Same,
+    Different,
+}
+
+async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestResult {
+    let home = Arc::new(tempfile::TempDir::new()?);
+    let durable_store = tempfile::TempDir::new()?;
+    let local_config = format!(
+        "[features.context_management]\nexperimental_mode = true\nbackend = 'local'\nlocal_store_dir = {}\n",
+        serde_json::to_string(durable_store.path())?,
+    );
+    if matches!(recovery_home, RecoveryHome::Different) {
+        std::fs::write(home.path().join("config.toml"), &local_config)?;
+    }
     let server = start_mock_server().await;
     let mock = mount_sse_sequence(&server, vec![
         response("r1", ev_function_call("bad-plan", "update_plan", &json!({
@@ -79,6 +102,7 @@ async fn local_history_recovers_omitted_originals_after_new_context_and_resume()
     );
     let registry = Arc::new(registry.build());
     let mut builder = test_codex()
+        .with_home(home)
         .with_extensions(Arc::clone(&registry))
         .with_config(configure_local);
     let test = builder.build_with_auto_env(&server).await?;
@@ -92,30 +116,44 @@ async fn local_history_recovers_omitted_originals_after_new_context_and_resume()
     let error_result = output(&requests, "find-error")?;
     assert!(user_result.to_string().contains(USER_CONSTRAINT));
     assert!(error_result.to_string().contains(TOOL_ERROR));
-    let original_error = requests[1].function_call_output_text("bad-plan").unwrap();
+    let original_error = requests[1]
+        .function_call_output_text("bad-plan")
+        .ok_or("missing original tool error")?;
     assert!(original_error.contains(TOOL_ERROR));
     let user_item = &user_result["items"][0];
     let error_item = error_result["items"]
         .as_array()
-        .unwrap()
+        .ok_or("history search items must be an array")?
         .iter()
         .find(|item| item["kind"] == "function_call_output" && item["call_id"] == "bad-plan")
-        .expect("search must return the actual tool output, not only its call arguments");
+        .ok_or("search must return the actual tool output, not only its call arguments")?;
     assert!(user_item["item_id"].is_string());
     assert!(error_item["item_id"].is_string());
     assert_eq!(user_item["window_id"], error_item["window_id"]);
     let windows = output(&requests, "list-windows")?;
-    assert_eq!(windows["windows"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        windows["windows"]
+            .as_array()
+            .ok_or("missing windows")?
+            .len(),
+        2
+    );
     assert_eq!(windows["windows"][0]["window_id"], user_item["window_id"]);
     let listed = output(&requests, "list-items")?;
-    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["items"]
+            .as_array()
+            .ok_or("missing listed items")?
+            .len(),
+        1
+    );
     // Native history also contains startup context in the user role.
     assert_eq!(listed["items"][0]["role"], "user");
     assert!(listed["items"][0]["item_id"].is_string());
     assert!(
         listed["items"][0]["truncated_content"]
             .as_str()
-            .unwrap()
+            .ok_or("missing listed item content")?
             .chars()
             .count()
             <= 200
@@ -123,7 +161,7 @@ async fn local_history_recovers_omitted_originals_after_new_context_and_resume()
     assert!(listed.to_string().len() <= 8000);
     let query_schema = requests[0]
         .tool_by_name("history", "search_contents")
-        .unwrap();
+        .ok_or("missing history search schema")?;
     assert_eq!(
         query_schema["parameters"]["properties"]["query"].get("encrypted"),
         None
@@ -170,14 +208,38 @@ async fn local_history_recovers_omitted_originals_after_new_context_and_resume()
     let mut resumed_builder = test_codex()
         .with_extensions(registry)
         .with_config(configure_local);
-    let resumed = resumed_builder
-        .restart(&resume_server, &test)
-        .await
-        .expect("resume local context thread");
+    let resumed = match recovery_home {
+        RecoveryHome::Same => resumed_builder.restart(&resume_server, &test).await?,
+        RecoveryHome::Different => {
+            let next_home = Arc::new(tempfile::TempDir::new()?);
+            std::fs::write(next_home.path().join("config.toml"), &local_config)?;
+            let rollout_path = test
+                .session_configured
+                .rollout_path
+                .clone()
+                .ok_or("missing rollout path")?;
+            test.codex.shutdown_and_wait().await?;
+            let resumed = resumed_builder
+                .resume(&resume_server, next_home, rollout_path)
+                .await?;
+            assert_ne!(resumed.config.codex_home, test.config.codex_home);
+            assert_eq!(
+                resumed.config.context_management_local_store_dir,
+                test.config.context_management_local_store_dir
+            );
+            assert!(
+                !resumed
+                    .config
+                    .codex_home
+                    .join("context-management-local")
+                    .exists()
+            );
+            resumed
+        }
+    };
     resumed
         .submit_turn("Read the returned original references again.")
-        .await
-        .expect("submit resumed recovery turn");
+        .await?;
     let resumed_requests = resumed_mock.requests();
     assert!(
         output(&resumed_requests, "read-user")?

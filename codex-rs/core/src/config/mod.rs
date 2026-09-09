@@ -1050,6 +1050,8 @@ pub struct Config {
     /// Selected context-management backend. This is parsed configuration state only; runtime
     /// backend activation is implemented separately.
     pub context_management_backend: ContextManagementBackend,
+    /// Owner-selected local notes and recovery-marker directory, independent of temporary homes.
+    pub context_management_local_store_dir: AbsolutePathBuf,
     /// Shared token budget for the root thread and its sub-agents.
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
@@ -3698,15 +3700,33 @@ impl Config {
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
-        let context_management_backend = cfg
+        let context_management_config = cfg
             .features
             .as_ref()
             .and_then(|features| features.context_management.as_ref())
             .and_then(|feature| match feature {
                 FeatureToml::Enabled(_) => None,
-                FeatureToml::Config(config) => config.backend,
-            })
+                FeatureToml::Config(config) => Some(config),
+            });
+        let context_management_backend = context_management_config
+            .and_then(|config| config.backend)
             .unwrap_or_default();
+        let context_management_local_store_dir =
+            match context_management_config.and_then(|config| config.local_store_dir.as_ref()) {
+                Some(path) => {
+                    if !path.is_absolute()
+                        || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                        || path.components().collect::<PathBuf>().as_os_str() != path.as_os_str()
+                    {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            "features.context_management.local_store_dir must be an absolute, normalized directory",
+                        ));
+                    }
+                    AbsolutePathBuf::from_absolute_path(path)?
+                }
+                None => codex_home.join("context-management-local"),
+            };
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
         let sleep_tool_mode = cfg
@@ -4315,6 +4335,7 @@ impl Config {
             multi_agent_v2,
             token_budget,
             context_management_backend,
+            context_management_local_store_dir,
             rollout_budget,
             current_time_reminder,
             sleep_tool_mode,

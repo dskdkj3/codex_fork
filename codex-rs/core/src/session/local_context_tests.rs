@@ -132,3 +132,94 @@ async fn local_context_rejects_invalid_manifest_and_ephemeral_threads() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn local_context_explicit_store_survives_different_homes() {
+    let first_home = TempDir::new().unwrap();
+    let second_home = TempDir::new().unwrap();
+    let durable_parent = TempDir::new().unwrap();
+    let durable = durable_parent.path().join("state").join("local");
+    let setting = format!(
+        "local_store_dir = {}\n",
+        toml::Value::String(durable.to_str().unwrap().to_string())
+    );
+    let first = local_config(&first_home, &setting).await;
+    let second = local_config(&second_home, &setting).await;
+    assert_eq!(first.context_management_local_store_dir.as_path(), durable);
+    assert_eq!(
+        first.context_management_local_store_dir,
+        second.context_management_local_store_dir
+    );
+    let thread_id = ThreadId::new();
+    prepare(&first, &InitialHistory::New, &SessionSource::Cli, thread_id).unwrap();
+    let resumed = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(Vec::new()),
+        rollout_path: None,
+    });
+    prepare(&second, &resumed, &SessionSource::Cli, thread_id).unwrap();
+    assert!(
+        durable
+            .join(thread_id.to_string())
+            .join("backend.json")
+            .is_file()
+    );
+    assert!(!second_home.path().join("context-management-local").exists());
+
+    let wrong_store = local_config(&second_home, "").await;
+    assert!(prepare(&wrong_store, &resumed, &SessionSource::Cli, thread_id).is_err());
+    assert!(!second_home.path().join("context-management-local").exists());
+}
+
+#[tokio::test]
+async fn local_context_rejects_nonabsolute_or_unnormalized_store_config() {
+    let home = TempDir::new().unwrap();
+    for path in [
+        "relative/state".to_string(),
+        format!("{}/../state", home.path().display()),
+        format!("{}/./state", home.path().display()),
+    ] {
+        fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[features.context_management]\nbackend = 'local'\nlocal_store_dir = {}\n",
+                toml::Value::String(path),
+            ),
+        )
+        .unwrap();
+        let error = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(home.path().to_path_buf())
+            .build()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("local_store_dir"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_context_rejects_symlinked_explicit_store_ancestor() {
+    let home = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let alias = home.path().join("alias");
+    std::os::unix::fs::symlink(target.path(), &alias).unwrap();
+    let store = alias.join("state");
+    let config = local_config(
+        &home,
+        &format!(
+            "local_store_dir = {}\n",
+            toml::Value::String(store.to_str().unwrap().to_string()),
+        ),
+    )
+    .await;
+    assert!(
+        prepare(
+            &config,
+            &InitialHistory::New,
+            &SessionSource::Cli,
+            ThreadId::new()
+        )
+        .is_err()
+    );
+    assert!(!target.path().join("state").exists());
+}
