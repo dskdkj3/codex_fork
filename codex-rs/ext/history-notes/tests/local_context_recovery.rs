@@ -81,18 +81,18 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
         response("r1", ev_function_call("bad-plan", "update_plan", &json!({
             "plan": [{"step": "exercise a native tool failure", "status": TOOL_ERROR}]
         }).to_string())),
-        response("r2", ev_function_call_with_namespace("save-note", "notes", "write_file", &json!({
+        response("r2", ev_function_call_with_namespace("save-note", "local_notes", "write_file", &json!({
             "path": "INDEX.md", "text": "Progress: continue the synthetic recovery test."
         }).to_string())),
         response("r3", ev_function_call("roll-over", "new_context", "{}")),
-        response("r4", ev_function_call_with_namespace("find-user", "history", "search_contents", &json!({
+        response("r4", ev_function_call_with_namespace("find-user", "local_history", "search_contents", &json!({
             "query": USER_CONSTRAINT, "role": "user"
         }).to_string())),
-        response("r5", ev_function_call_with_namespace("find-error", "history", "search_contents", &json!({
+        response("r5", ev_function_call_with_namespace("find-error", "local_history", "search_contents", &json!({
             "query": TOOL_ERROR, "role": "tool"
         }).to_string())),
-        response("r6", ev_function_call_with_namespace("list-windows", "history", "list_windows", "{}")),
-        response("r7", ev_function_call_with_namespace("list-items", "history", "list_items", "{\"role\":\"user\",\"limit\":1,\"max_chars_per_item\":200}")),
+        response("r6", ev_function_call_with_namespace("list-windows", "local_history", "list_windows", "{}")),
+        response("r7", ev_function_call_with_namespace("list-items", "local_history", "list_items", "{\"role\":\"user\",\"limit\":1,\"max_chars_per_item\":200}")),
         response("r8", ev_assistant_message("done-1", "recovered")),
     ]).await;
     let mut registry = ExtensionRegistryBuilder::<Config>::new();
@@ -159,9 +159,41 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
             <= 200
     );
     assert!(listed.to_string().len() <= 8000);
+    for (namespace, name) in [
+        ("local_history", "list_windows"),
+        ("local_history", "list_items"),
+        ("local_history", "read_item"),
+        ("local_history", "search_contents"),
+        ("local_notes", "list_files_by_prefix"),
+        ("local_notes", "read_file"),
+        ("local_notes", "search_contents"),
+        ("local_notes", "append_to_file"),
+        ("local_notes", "write_file"),
+    ] {
+        assert!(
+            requests[0].tool_by_name(namespace, name).is_some(),
+            "missing serialized local tool {namespace}.{name}"
+        );
+    }
+    for (namespace, name) in [
+        ("history", "list_windows"),
+        ("history", "list_items"),
+        ("history", "read_item"),
+        ("history", "search_contents"),
+        ("notes", "list_files_by_prefix"),
+        ("notes", "read_file"),
+        ("notes", "search_contents"),
+        ("notes", "append_to_file"),
+        ("notes", "write_file"),
+    ] {
+        assert!(
+            requests[0].tool_by_name(namespace, name).is_none(),
+            "reserved tool alias leaked into local request: {namespace}.{name}"
+        );
+    }
     let query_schema = requests[0]
-        .tool_by_name("history", "search_contents")
-        .ok_or("missing history search schema")?;
+        .tool_by_name("local_history", "search_contents")
+        .ok_or("missing local history search schema")?;
     assert_eq!(
         query_schema["parameters"]["properties"]["query"].get("encrypted"),
         None
@@ -178,7 +210,7 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
                 "r7",
                 ev_function_call_with_namespace(
                     "read-user",
-                    "history",
+                    "local_history",
                     "read_item",
                     &read_args(user_item),
                 ),
@@ -187,7 +219,7 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
                 "r8",
                 ev_function_call_with_namespace(
                     "read-error",
-                    "history",
+                    "local_history",
                     "read_item",
                     &read_args(error_item),
                 ),
@@ -196,7 +228,7 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
                 "r9",
                 ev_function_call_with_namespace(
                     "read-note",
-                    "notes",
+                    "local_notes",
                     "read_file",
                     "{\"path\":\"INDEX.md\"}",
                 ),
@@ -262,6 +294,97 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_keeps_legacy_calls_as_history_without_advertising_reserved_aliases() -> TestResult {
+    fn contains_namespaced_call(value: &Value, namespace: &str, name: &str) -> bool {
+        match value {
+            Value::Array(values) => values
+                .iter()
+                .any(|value| contains_namespaced_call(value, namespace, name)),
+            Value::Object(map) => {
+                (map.get("type").and_then(Value::as_str) == Some("function_call")
+                    && map.get("namespace").and_then(Value::as_str) == Some(namespace)
+                    && map.get("name").and_then(Value::as_str) == Some(name))
+                    || map
+                        .values()
+                        .any(|value| contains_namespaced_call(value, namespace, name))
+            }
+            _ => false,
+        }
+    }
+
+    let home = Arc::new(tempfile::TempDir::new()?);
+    let server = start_mock_server().await;
+    let initial_mock = mount_sse_sequence(
+        &server,
+        vec![
+            response(
+                "legacy-1",
+                ev_function_call_with_namespace(
+                    "legacy-history-call",
+                    "history",
+                    "list_items",
+                    "{}",
+                ),
+            ),
+            response(
+                "legacy-2",
+                ev_assistant_message("legacy-done", "legacy call recorded"),
+            ),
+        ],
+    )
+    .await;
+    let mut registry = ExtensionRegistryBuilder::<Config>::new();
+    install(
+        &mut registry,
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("synthetic")),
+    );
+    let registry = Arc::new(registry.build());
+    let test = test_codex()
+        .with_home(home)
+        .with_extensions(Arc::clone(&registry))
+        .with_config(configure_local)
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("Record one legacy local-tool call.")
+        .await?;
+    assert_eq!(initial_mock.requests().len(), 2);
+
+    let resume_server = start_mock_server().await;
+    let resumed_mock = mount_sse_sequence(
+        &resume_server,
+        vec![response(
+            "legacy-3",
+            ev_assistant_message("resume-done", "resume complete"),
+        )],
+    )
+    .await;
+    let resumed = test_codex()
+        .with_extensions(registry)
+        .with_config(configure_local)
+        .restart(&resume_server, &test)
+        .await?;
+    resumed.submit_turn("Continue after resume.").await?;
+    let requests = resumed_mock.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(contains_namespaced_call(
+        &request.body_json()["input"],
+        "history",
+        "list_items"
+    ));
+    assert!(request.tool_by_name("history", "list_items").is_none());
+    assert!(request.tool_by_name("notes", "write_file").is_none());
+    assert!(
+        request
+            .tool_by_name("local_history", "list_items")
+            .is_some()
+    );
+    assert!(request.tool_by_name("local_notes", "write_file").is_some());
+    resumed.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_history_survives_automatic_budget_rollover() -> TestResult {
     let server = start_mock_server().await;
     let mock = mount_sse_sequence(
@@ -281,7 +404,7 @@ async fn local_history_survives_automatic_budget_rollover() -> TestResult {
                 "auto-3",
                 ev_function_call_with_namespace(
                     "find-after-auto",
-                    "history",
+                    "local_history",
                     "search_contents",
                     &json!({
                         "query": USER_CONSTRAINT, "role": "user"

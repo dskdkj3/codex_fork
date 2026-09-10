@@ -20,6 +20,8 @@ use crate::tool_output::HistoryNotesToolOutput;
 
 const HISTORY_NAMESPACE: &str = "history";
 const NOTES_NAMESPACE: &str = "notes";
+const LOCAL_HISTORY_NAMESPACE: &str = "local_history";
+const LOCAL_NOTES_NAMESPACE: &str = "local_notes";
 const HISTORY_DESCRIPTION: &str = "Recover prior conversation after a context-window reset by listing, reading, and searching normalized history using agent names and the opaque window and item IDs returned by these tools. Pass returned IDs unchanged when filtering or reading an item. Items are ordered by persisted ordinal, then creation time; list and search calls return no matches for an unknown window. Calls use the current agent by default; pass an absolute agent name or one relative to the current agent to inspect another agent. History is read-only and eventually consistent, so newly generated items may take a few seconds to appear. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
 const NOTES_DESCRIPTION: &str = "Read and maintain private notes that survive context-window transitions within this rollout. Paths are virtual, not filesystem paths. Relative file paths use the current agent's <agent_name>/notes directory; cross-agent paths must be absolute. Absolute paths use <agent_name>/notes[/<path>]. Reads, listings, searches, and writes may access other agents' notes. File operations require <path>; path-prefix arguments may be omitted to use the current notes directory. Empty, '.', and '..' path components are unsupported. Shell expansion is not performed, so '~' is treated literally. Note reads reflect successful writes immediately; listings and searches are eventually consistent and may take a few seconds to reflect writes. Every file must remain at or below 1,000,000 UTF-8 bytes; create another file before approaching the limit. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
 const HISTORY_AGENT_NAME_DESCRIPTION: &str = "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent.";
@@ -134,6 +136,15 @@ impl HistoryNotesAction {
             | Self::NotesSearchContents
             | Self::NotesAppendToFile
             | Self::NotesWriteFile => NOTES_NAMESPACE,
+        }
+    }
+
+    fn namespace_for_backend(self, local: bool) -> &'static str {
+        match (local, self.namespace()) {
+            (true, HISTORY_NAMESPACE) => LOCAL_HISTORY_NAMESPACE,
+            (true, NOTES_NAMESPACE) => LOCAL_NOTES_NAMESPACE,
+            (false, namespace) => namespace,
+            _ => unreachable!("History actions use a known namespace"),
         }
     }
 
@@ -364,7 +375,10 @@ impl HistoryNotesTool {
 
 impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
     fn tool_name(&self) -> ToolName {
-        ToolName::namespaced(self.action.namespace(), self.action.name())
+        ToolName::namespaced(
+            self.action.namespace_for_backend(self.backend.is_local()),
+            self.action.name(),
+        )
     }
 
     fn spec(&self) -> ToolSpec {
@@ -375,7 +389,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
             self.action.parameters()
         };
         ToolSpec::Namespace(ResponsesApiNamespace {
-            name: self.action.namespace().to_string(),
+            name: self.action.namespace_for_backend(local).to_string(),
             description: if local {
                 self.action.local_namespace_description()
             } else {
