@@ -62,6 +62,7 @@ use crate::state_db;
 use crate::state_db::StateDbHandle;
 use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
+use codex_protocol::protocol::ContextManagementBackend;
 use codex_protocol::protocol::GitInfo as ProtocolGitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -112,6 +113,7 @@ pub enum RolloutRecorderParams {
         dynamic_tools: Vec<DynamicToolSpec>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         multi_agent_version: Option<MultiAgentVersion>,
+        context_management_backend: Option<ContextManagementBackend>,
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
@@ -209,6 +211,7 @@ impl RolloutRecorderParams {
             dynamic_tools,
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
+            context_management_backend: None,
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
@@ -261,6 +264,20 @@ impl RolloutRecorderParams {
         } = &mut self
         {
             *version = multi_agent_version;
+        }
+        self
+    }
+
+    pub fn with_context_management_backend(
+        mut self,
+        context_management_backend: ContextManagementBackend,
+    ) -> Self {
+        if let Self::Create {
+            context_management_backend: backend,
+            ..
+        } = &mut self
+        {
+            *backend = Some(context_management_backend);
         }
         self
     }
@@ -853,6 +870,7 @@ impl RolloutRecorder {
                 dynamic_tools,
                 selected_capability_roots,
                 multi_agent_version,
+                context_management_backend,
                 history_mode,
                 history_base,
                 subagent_history_start_ordinal,
@@ -900,6 +918,7 @@ impl RolloutRecorder {
                     history_base,
                     subagent_history_start_ordinal,
                     multi_agent_version,
+                    context_management_backend,
                     context_window: initial_window_id.map(SessionContextWindow::new),
                 };
 

@@ -14,6 +14,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ContextManagementBackend;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -96,6 +97,8 @@ pub struct CreateThreadParams {
     pub selected_capability_roots: Vec<SelectedCapabilityRoot>,
     /// Multi-agent runtime selected when the thread was created.
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Actual context-management backend selected for this thread.
+    pub context_management_backend: ContextManagementBackend,
     /// Persisted thread history contract selected when the thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Exclusive prefix of another paginated rollout inherited by this thread.

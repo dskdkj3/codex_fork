@@ -330,6 +330,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
+            context_management_backend: Default::default(),
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,

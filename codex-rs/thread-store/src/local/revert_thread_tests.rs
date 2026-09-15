@@ -161,6 +161,7 @@ async fn create_paginated_thread(store: &LocalThreadStore, thread_id: ThreadId) 
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
+            context_management_backend: Default::default(),
             history_mode: ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,

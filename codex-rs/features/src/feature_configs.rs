@@ -1,6 +1,7 @@
 use crate::FeatureConfig;
 use crate::FeatureToml;
 use codex_protocol::openai_models::ReasoningEffort;
+pub use codex_protocol::protocol::ContextManagementBackend;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -291,16 +292,6 @@ impl FeatureConfig for MultiAgentV2ConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextManagementBackend {
-    /// Use the official Codex backend and its existing eligibility checks.
-    #[default]
-    Codex,
-    /// Keep context-management state in the local Codex thread store.
-    Local,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

@@ -40,6 +40,7 @@ pub(super) async fn create_thread(
         .with_session_id(params.session_id)
         .with_selected_capability_roots(params.selected_capability_roots)
         .with_multi_agent_version(params.multi_agent_version)
+        .with_context_management_backend(params.context_management_backend)
         .with_history_mode(params.history_mode)
         .with_history_base(params.history_base)
         .with_forked_from_ordinal_exclusive(

@@ -3000,6 +3000,27 @@ pub enum MultiAgentVersion {
     V2,
 }
 
+/// Context-management backend used by configuration and persisted thread metadata.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ContextManagementBackend {
+    #[default]
+    /// Use the official Codex backend and its existing eligibility checks.
+    Codex,
+    /// Keep context-management state in the local Codex thread store.
+    Local,
+}
+
+fn deserialize_context_management_backend<'de, D>(
+    deserializer: D,
+) -> Result<Option<ContextManagementBackend>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ContextManagementBackend::deserialize(deserializer).map(Some)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
 pub struct SessionContextWindow {
     /// UUIDv7 identity of this context window.
@@ -3093,6 +3114,13 @@ pub struct SessionMeta {
     pub subagent_history_start_ordinal: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<MultiAgentVersion>,
+    /// Actual context-management backend selected when this rollout was created.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_context_management_backend",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_management_backend: Option<ContextManagementBackend>,
     /// Initial context-window identity for consumers that tail rollout JSONL before compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<SessionContextWindow>,
@@ -3125,6 +3153,7 @@ impl Default for SessionMeta {
             history_base: None,
             subagent_history_start_ordinal: None,
             multi_agent_version: None,
+            context_management_backend: None,
             context_window: None,
         }
     }
@@ -5996,12 +6025,24 @@ mod tests {
         assert_eq!(session_meta.history_mode, ThreadHistoryMode::Legacy);
         assert_eq!(session_meta.history_base, None);
         assert_eq!(session_meta.forked_from_ordinal_exclusive, None);
+        assert_eq!(session_meta.context_management_backend, None);
         let serialized = serde_json::to_value(&session_meta)?;
         assert!(serialized.get("forked_from_ordinal_exclusive").is_none());
         assert_eq!(serialized["history_mode"], json!("legacy"));
-        let mut unknown = serialized;
+        let mut unknown = serialized.clone();
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
+        for backend in [json!(null), json!(1), json!("future")] {
+            let mut invalid = serialized.clone();
+            invalid["context_management_backend"] = backend;
+            assert!(serde_json::from_value::<SessionMeta>(invalid).is_err());
+        }
+        let mut local = serialized;
+        local["context_management_backend"] = json!("local");
+        assert_eq!(
+            serde_json::from_value::<SessionMeta>(local)?.context_management_backend,
+            Some(ContextManagementBackend::Local)
+        );
         Ok(())
     }
 

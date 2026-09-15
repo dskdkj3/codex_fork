@@ -6,6 +6,9 @@ use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use pretty_assertions::assert_eq;
@@ -14,6 +17,7 @@ use tempfile::TempDir;
 use super::activate;
 use super::enabled;
 use super::prepare;
+use super::resolve_resumed_backend;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
 
@@ -32,8 +36,39 @@ async fn local_config(home: &TempDir, additional: &str) -> Config {
         .expect("load synthetic config")
 }
 
+fn spawned_child_source() -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
+
+fn resumed_history(
+    thread_id: ThreadId,
+    backend: Option<ContextManagementBackend>,
+) -> InitialHistory {
+    InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(vec![codex_history::RolloutItem::SessionMeta(
+            SessionMetaLine {
+                meta: SessionMeta {
+                    id: thread_id,
+                    session_id: thread_id.into(),
+                    context_management_backend: backend,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            },
+        )]),
+        rollout_path: None,
+    })
+}
+
 #[tokio::test]
-async fn local_context_activates_without_official_auth_and_excludes_children() {
+async fn local_context_activates_without_official_auth_for_fresh_children() {
     let home = TempDir::new().unwrap();
     let mut config = local_config(&home, "").await;
     config.model_provider.requires_openai_auth = false;
@@ -48,14 +83,149 @@ async fn local_context_activates_without_official_auth_and_excludes_children() {
             .use_history_notes_extension
     );
 
-    activate(
-        &mut config,
-        &SessionSource::SubAgent(SubAgentSource::Compact),
-    )
-    .unwrap();
-    assert!(!enabled(&config));
+    activate(&mut config, &spawned_child_source()).unwrap();
+    assert!(enabled(&config));
+    assert!(config.features.enabled(Feature::TokenBudget));
+    assert!(config.token_budget.is_some());
+}
+
+#[tokio::test]
+async fn resumed_children_use_their_own_recorded_backend() {
+    let home = TempDir::new().unwrap();
+    let mut config = local_config(&home, "").await;
+    activate(&mut config, &SessionSource::Cli).unwrap();
+    assert!(enabled(&config));
+    assert!(config.features.enabled(Feature::TokenBudget));
+    assert!(config.token_budget.is_some());
+    let thread_id = ThreadId::new();
+    let child = spawned_child_source();
+
+    let historical = resumed_history(thread_id, None);
+    let _ = resolve_resumed_backend(&mut config, &historical, &child).unwrap();
+    assert_eq!(
+        config.context_management_backend,
+        ContextManagementBackend::Codex
+    );
+    assert!(!config.features.enabled(Feature::ContextManagement));
     assert!(!config.features.enabled(Feature::TokenBudget));
     assert_eq!(config.token_budget, None);
+
+    let local = resumed_history(thread_id, Some(ContextManagementBackend::Local));
+    let _ = resolve_resumed_backend(&mut config, &local, &child).unwrap();
+    assert_eq!(
+        config.context_management_backend,
+        ContextManagementBackend::Local
+    );
+    assert!(config.features.enabled(Feature::ContextManagement));
+    activate(&mut config, &child).unwrap();
+    assert!(config.features.enabled(Feature::TokenBudget));
+    assert!(config.token_budget.is_some());
+    assert!(prepare(&config, &local, thread_id).is_err());
+    prepare(&config, &InitialHistory::New, thread_id).unwrap();
+    prepare(&config, &local, thread_id).unwrap();
+
+    let codex = resumed_history(thread_id, Some(ContextManagementBackend::Codex));
+    let _ = resolve_resumed_backend(&mut config, &codex, &child).unwrap();
+    assert_eq!(
+        config.context_management_backend,
+        ContextManagementBackend::Codex
+    );
+    assert!(!config.features.enabled(Feature::ContextManagement));
+    assert!(!config.features.enabled(Feature::TokenBudget));
+    assert_eq!(config.token_budget, None);
+    assert!(prepare(&config, &codex, thread_id).is_err());
+}
+
+#[tokio::test]
+async fn local_context_excludes_internal_sources_and_rejects_recorded_local_recovery() {
+    for source in [
+        SessionSource::SubAgent(SubAgentSource::Review),
+        SessionSource::SubAgent(SubAgentSource::Compact),
+        SessionSource::SubAgent(SubAgentSource::Other("fixture".to_string())),
+        SessionSource::SubAgent(SubAgentSource::MemoryConsolidation),
+        SessionSource::Internal(InternalSessionSource::Guardian),
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
+    ] {
+        let home = TempDir::new().unwrap();
+        let mut config = local_config(&home, "").await;
+        activate(&mut config, &SessionSource::Cli).unwrap();
+        activate(&mut config, &source).unwrap();
+        assert_eq!(
+            config.context_management_backend,
+            ContextManagementBackend::Codex
+        );
+        assert!(!config.features.enabled(Feature::ContextManagement));
+        assert!(!config.features.enabled(Feature::TokenBudget));
+        assert!(config.token_budget.is_none());
+        let thread_id = ThreadId::new();
+        prepare(&config, &InitialHistory::New, thread_id).unwrap();
+        assert!(
+            !config
+                .context_management_local_store_dir
+                .join(thread_id.to_string())
+                .exists()
+        );
+        let local = resumed_history(thread_id, Some(ContextManagementBackend::Local));
+        assert!(resolve_resumed_backend(&mut config, &local, &source).is_err());
+        let mut recorded_internal = local;
+        let InitialHistory::Resumed(ref mut resumed) = recorded_internal else {
+            panic!("expected resumed fixture");
+        };
+        let codex_history::RolloutItem::SessionMeta(meta) =
+            &mut Arc::make_mut(&mut resumed.history)[0]
+        else {
+            panic!("expected canonical metadata");
+        };
+        meta.meta.source = source;
+        assert!(
+            resolve_resumed_backend(&mut config, &recorded_internal, &SessionSource::Cli).is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn resumed_official_children_preserve_existing_experimental_activation_state() {
+    for backend in [None, Some(ContextManagementBackend::Codex)] {
+        for source in [
+            spawned_child_source(),
+            SessionSource::SubAgent(SubAgentSource::Review),
+        ] {
+            let home = TempDir::new().unwrap();
+            let mut config = local_config(&home, "").await;
+            // Construct the already-activated flag state produced by official
+            // eligibility. This test does not claim a live OAuth/authentication probe.
+            activate(&mut config, &SessionSource::Cli).unwrap();
+            config.context_management_backend = ContextManagementBackend::Codex;
+            let original_budget = config.token_budget.clone();
+            let history = resumed_history(ThreadId::new(), backend);
+            assert_eq!(
+                resolve_resumed_backend(&mut config, &history, &source).unwrap(),
+                None
+            );
+            assert_eq!(
+                config.context_management_backend,
+                ContextManagementBackend::Codex
+            );
+            assert!(config.features.enabled(Feature::ContextManagement));
+            assert!(config.features.enabled(Feature::TokenBudget));
+            assert_eq!(config.token_budget, original_budget);
+        }
+    }
+}
+
+#[tokio::test]
+async fn historical_root_keeps_m6_config_and_marker_compatibility() {
+    let home = TempDir::new().unwrap();
+    let mut config = local_config(&home, "").await;
+    let thread_id = ThreadId::new();
+    prepare(&config, &InitialHistory::New, thread_id).unwrap();
+    let historical = resumed_history(thread_id, None);
+    let _ = resolve_resumed_backend(&mut config, &historical, &SessionSource::Cli).unwrap();
+    assert_eq!(
+        config.context_management_backend,
+        ContextManagementBackend::Local
+    );
+    prepare(&config, &historical, thread_id).unwrap();
 }
 
 #[tokio::test]
@@ -74,23 +244,13 @@ async fn local_context_resume_requires_same_persisted_backend_and_thread() {
     let home = TempDir::new().unwrap();
     let mut config = local_config(&home, "").await;
     let thread_id = ThreadId::new();
-    let resumed = InitialHistory::Resumed(ResumedHistory {
-        conversation_id: thread_id,
-        history: Arc::new(Vec::new()),
-        rollout_path: None,
-    });
-    assert!(prepare(&config, &resumed, &SessionSource::Cli, thread_id).is_err());
-    prepare(
-        &config,
-        &InitialHistory::New,
-        &SessionSource::Cli,
-        thread_id,
-    )
-    .unwrap();
-    prepare(&config, &resumed, &SessionSource::Cli, thread_id).unwrap();
-    assert!(prepare(&config, &resumed, &SessionSource::Cli, ThreadId::new()).is_err());
+    let resumed = resumed_history(thread_id, Some(ContextManagementBackend::Local));
+    assert!(prepare(&config, &resumed, thread_id).is_err());
+    prepare(&config, &InitialHistory::New, thread_id).unwrap();
+    prepare(&config, &resumed, thread_id).unwrap();
+    assert!(prepare(&config, &resumed, ThreadId::new()).is_err());
     config.context_management_backend = ContextManagementBackend::Codex;
-    assert!(prepare(&config, &resumed, &SessionSource::Cli, thread_id).is_err());
+    assert!(prepare(&config, &resumed, thread_id).is_err());
 }
 
 #[tokio::test]
@@ -101,13 +261,7 @@ async fn local_context_rejects_invalid_manifest_and_ephemeral_threads() {
     assert!(activate(&mut config, &SessionSource::Cli).is_err());
     config.ephemeral = false;
     let thread_id = ThreadId::new();
-    prepare(
-        &config,
-        &InitialHistory::New,
-        &SessionSource::Cli,
-        thread_id,
-    )
-    .unwrap();
+    prepare(&config, &InitialHistory::New, thread_id).unwrap();
     fs::write(
         home.path()
             .join("context-management-local")
@@ -116,17 +270,12 @@ async fn local_context_rejects_invalid_manifest_and_ephemeral_threads() {
         "{\"version\":999}",
     )
     .unwrap();
-    let resumed = InitialHistory::Resumed(ResumedHistory {
-        conversation_id: thread_id,
-        history: Arc::new(Vec::new()),
-        rollout_path: None,
-    });
-    assert!(prepare(&config, &resumed, &SessionSource::Cli, thread_id).is_err());
+    let resumed = resumed_history(thread_id, Some(ContextManagementBackend::Local));
+    assert!(prepare(&config, &resumed, thread_id).is_err());
     assert!(
         prepare(
             &config,
             &InitialHistory::Forked(Vec::new()),
-            &SessionSource::Cli,
             ThreadId::new()
         )
         .is_err()
@@ -151,13 +300,9 @@ async fn local_context_explicit_store_survives_different_homes() {
         second.context_management_local_store_dir
     );
     let thread_id = ThreadId::new();
-    prepare(&first, &InitialHistory::New, &SessionSource::Cli, thread_id).unwrap();
-    let resumed = InitialHistory::Resumed(ResumedHistory {
-        conversation_id: thread_id,
-        history: Arc::new(Vec::new()),
-        rollout_path: None,
-    });
-    prepare(&second, &resumed, &SessionSource::Cli, thread_id).unwrap();
+    prepare(&first, &InitialHistory::New, thread_id).unwrap();
+    let resumed = resumed_history(thread_id, Some(ContextManagementBackend::Local));
+    prepare(&second, &resumed, thread_id).unwrap();
     assert!(
         durable
             .join(thread_id.to_string())
@@ -167,7 +312,7 @@ async fn local_context_explicit_store_survives_different_homes() {
     assert!(!second_home.path().join("context-management-local").exists());
 
     let wrong_store = local_config(&second_home, "").await;
-    assert!(prepare(&wrong_store, &resumed, &SessionSource::Cli, thread_id).is_err());
+    assert!(prepare(&wrong_store, &resumed, thread_id).is_err());
     assert!(!second_home.path().join("context-management-local").exists());
 }
 
@@ -212,14 +357,6 @@ async fn local_context_rejects_symlinked_explicit_store_ancestor() {
         ),
     )
     .await;
-    assert!(
-        prepare(
-            &config,
-            &InitialHistory::New,
-            &SessionSource::Cli,
-            ThreadId::new()
-        )
-        .is_err()
-    );
+    assert!(prepare(&config, &InitialHistory::New, ThreadId::new()).is_err());
     assert!(!target.path().join("state").exists());
 }

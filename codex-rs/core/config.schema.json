@@ -1143,6 +1143,7 @@
       "type": "object"
     },
     "ContextManagementBackend": {
+      "description": "Context-management backend used by configuration and persisted thread metadata.",
       "oneOf": [
         {
           "description": "Use the official Codex backend and its existing eligibility checks.",

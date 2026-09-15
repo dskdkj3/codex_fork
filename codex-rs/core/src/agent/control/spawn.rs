@@ -1175,23 +1175,91 @@ impl AgentControl {
                 include_history: false,
             })
             .await?;
-        let resumed_agent_path = stored_thread
-            .agent_path
-            .as_deref()
-            .map(AgentPath::try_from)
-            .transpose()
-            .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?;
-        let resumed_agent_nickname = stored_thread.agent_nickname.clone();
-        let resumed_agent_role = stored_thread.agent_role.clone();
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        // The replay includes the canonical SessionMeta. SQLite fields are projections and
+        // must not override the durable child identity before its runtime is re-registered.
+        let recorded_meta = history.iter().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(&meta.meta),
+            _ => None,
+        });
+        if recorded_meta.is_some_and(|meta| meta.id != thread_id) {
+            return Err(CodexErr::InvalidRequest(
+                "stored child metadata belongs to another thread".to_string(),
+            ));
+        }
+        let identity_source = recorded_meta.map_or(&stored_thread.source, |meta| &meta.source);
+        let mut parent_thread_id =
+            recorded_meta.map_or(stored_thread.parent_thread_id, |meta| meta.parent_thread_id);
+        let recorded_path = recorded_meta.map_or(stored_thread.agent_path.as_deref(), |meta| {
+            meta.agent_path.as_deref()
+        });
+        let recorded_role = recorded_meta.map_or(stored_thread.agent_role.as_deref(), |meta| {
+            meta.agent_role.as_deref()
+        });
+        let thread_source = recorded_meta.map_or(stored_thread.thread_source.as_ref(), |meta| {
+            meta.thread_source.as_ref()
+        });
+        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: source_parent,
+            agent_path: source_path,
+            agent_role: source_role,
+            ..
+        }) = identity_source
+        {
+            if parent_thread_id.is_some_and(|parent| parent != *source_parent)
+                || recorded_path
+                    .zip(source_path.as_ref())
+                    .is_some_and(|(path, source)| path != source.as_str())
+                || recorded_role
+                    .zip(source_role.as_deref())
+                    .is_some_and(|(role, source)| role != source)
+                || thread_source.is_some_and(|source| *source != ThreadSource::Subagent)
+            {
+                return Err(CodexErr::InvalidRequest(
+                    "stored child identity conflicts with native source".to_string(),
+                ));
+            }
+            parent_thread_id = parent_thread_id.or(Some(*source_parent));
+        }
+        let resumed_agent_path = recorded_path
+            .map(AgentPath::try_from)
+            .transpose()
+            .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?
+            .or_else(|| identity_source.get_agent_path());
+        let resumed_agent_nickname = stored_thread
+            .agent_nickname
+            .clone()
+            .or_else(|| stored_thread.source.get_nickname());
+        let resumed_agent_role = recorded_role
+            .map(str::to_owned)
+            .or_else(|| identity_source.get_agent_role());
+        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: requested_parent,
+            agent_path: requested_path,
+            agent_role: requested_role,
+            ..
+        }) = &session_source
+            && (parent_thread_id.is_some_and(|parent| parent != *requested_parent)
+                || resumed_agent_path
+                    .as_ref()
+                    .zip(requested_path.as_ref())
+                    .is_some_and(|(recorded, requested)| recorded != requested)
+                || resumed_agent_role
+                    .as_ref()
+                    .zip(requested_role.as_ref())
+                    .is_some_and(|(recorded, requested)| recorded != requested))
+        {
+            return Err(CodexErr::InvalidRequest(
+                "requested child identity conflicts with recorded identity".to_string(),
+            ));
+        }
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history: Arc::new(history),
             rollout_path: stored_thread.rollout_path,
         });
-        let parent_thread_id = stored_thread.parent_thread_id;
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &initial_history,

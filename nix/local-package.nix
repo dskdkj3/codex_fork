@@ -93,6 +93,7 @@ sourcePackage.overrideAttrs (old: {
   '';
   passthru = (old.passthru or { }) // {
     supportsLocalContext = true;
+    supportsLocalContextSubagents = true;
     canonicalPackageLayout = 1;
   };
 })

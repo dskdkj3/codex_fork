@@ -13,6 +13,7 @@ use codex_history::InitialHistory;
 use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use serde_json::json;
 
 use crate::config::Config;
@@ -20,17 +21,96 @@ use crate::config::resolve_token_budget_config;
 
 const MANIFEST_LIMIT: u64 = 1024;
 
+pub(super) fn supports_source(source: &SessionSource) -> bool {
+    !source.is_non_root_agent()
+        || matches!(
+            source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+}
+
 pub(super) fn enabled(config: &Config) -> bool {
     config.context_management_backend == ContextManagementBackend::Local
         && config.features.enabled(Feature::ContextManagement)
+}
+
+pub(super) fn resolve_resumed_backend(
+    config: &mut Config,
+    history: &InitialHistory,
+    source: &SessionSource,
+) -> io::Result<Option<ContextManagementBackend>> {
+    if !matches!(history, InitialHistory::Resumed(_)) {
+        return Ok(None);
+    }
+
+    let inherited_local_backend =
+        config.context_management_backend == ContextManagementBackend::Local;
+    let recorded_backend = history.get_resumed_context_management_backend();
+    let recorded_source_is_supported = history
+        .get_rollout_items()
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(supports_source(&meta.meta.source)),
+            _ => None,
+        })
+        .unwrap_or(true);
+    if recorded_backend == Some(ContextManagementBackend::Local)
+        && (!supports_source(source) || !recorded_source_is_supported)
+    {
+        return Err(io::Error::other(
+            "local context does not support this internal thread source",
+        ));
+    }
+    if let Some(backend) = recorded_backend {
+        config.context_management_backend = backend;
+    } else if source.is_non_root_agent() {
+        config.context_management_backend = ContextManagementBackend::Codex;
+    }
+
+    // Codex also represents the official experimental backend. Only override its
+    // activation state when removing inherited local state; otherwise keep the
+    // existing official eligibility and explicit opt-in path.
+    let resumed_child_backend = (source.is_non_root_agent()
+        && (inherited_local_backend || recorded_backend == Some(ContextManagementBackend::Local)))
+    .then_some(recorded_backend.unwrap_or(ContextManagementBackend::Codex));
+    if let Some(backend) = resumed_child_backend {
+        match backend {
+            ContextManagementBackend::Local => {
+                config
+                    .features
+                    .enable(Feature::ContextManagement)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+            }
+            ContextManagementBackend::Codex => {
+                config
+                    .features
+                    .disable(Feature::ContextManagement)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                config
+                    .features
+                    .disable(Feature::TokenBudget)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                config.token_budget = None;
+            }
+        }
+    }
+    Ok(resumed_child_backend)
+}
+
+pub(super) fn resolved_backend(config: &Config) -> ContextManagementBackend {
+    if enabled(config) {
+        ContextManagementBackend::Local
+    } else {
+        ContextManagementBackend::Codex
+    }
 }
 
 pub(super) fn activate(config: &mut Config, source: &SessionSource) -> io::Result<()> {
     if !enabled(config) {
         return Ok(());
     }
-    // Child configuration may be cloned from an already activated root.
-    if source.is_non_root_agent() {
+    if !supports_source(source) {
+        config.context_management_backend = ContextManagementBackend::Codex;
         config
             .features
             .disable(Feature::ContextManagement)
@@ -89,12 +169,8 @@ pub(super) fn activate(config: &mut Config, source: &SessionSource) -> io::Resul
 pub(super) fn prepare(
     config: &Config,
     history: &InitialHistory,
-    source: &SessionSource,
     thread_id: ThreadId,
 ) -> io::Result<()> {
-    if source.is_non_root_agent() {
-        return Ok(());
-    }
     let local = enabled(config);
     let resumed = matches!(history, InitialHistory::Resumed(_));
     if !local && !resumed {

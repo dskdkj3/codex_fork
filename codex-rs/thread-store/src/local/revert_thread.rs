@@ -169,6 +169,11 @@ async fn create_replacement_recorder(
     .with_rollout_id(rollout_id)
     .with_selected_capability_roots(source_meta.selected_capability_roots)
     .with_multi_agent_version(source_meta.multi_agent_version)
+    .with_context_management_backend(
+        source_meta
+            .context_management_backend
+            .unwrap_or(codex_protocol::protocol::ContextManagementBackend::Codex),
+    )
     .with_history_mode(ThreadHistoryMode::Paginated)
     .with_history_base(history_base)
     .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive)

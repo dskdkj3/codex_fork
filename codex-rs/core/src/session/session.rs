@@ -773,12 +773,7 @@ impl Session {
                 ));
             }
         };
-        super::local_context::prepare(
-            &config,
-            &initial_history,
-            &session_configuration.session_source,
-            thread_id,
-        )?;
+        super::local_context::prepare(&config, &initial_history, thread_id)?;
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -875,6 +870,9 @@ impl Session {
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
+                            context_management_backend: super::local_context::resolved_backend(
+                                &config,
+                            ),
                             history_mode: session_configuration.history_mode,
                             history_base: match &fork_persistence {
                                 ForkPersistence::Copied => None,

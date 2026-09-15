@@ -437,6 +437,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     history_base: None,
                     subagent_history_start_ordinal: None,
                     multi_agent_version: None,
+                    context_management_backend: None,
                     context_window: None,
                 },
                 git: None,

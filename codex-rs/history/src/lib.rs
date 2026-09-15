@@ -372,6 +372,13 @@ impl InitialHistory {
             .and_then(|meta| meta.thread_source.clone())
     }
 
+    pub fn get_resumed_context_management_backend(
+        &self,
+    ) -> Option<codex_protocol::protocol::ContextManagementBackend> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.context_management_backend)
+    }
+
     pub fn get_session_originator(&self) -> Option<String> {
         self.get_session_meta()
             .map(|meta| meta.originator.clone())
