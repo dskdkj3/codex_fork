@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use codex_core::StartThreadOptions;
 use codex_core::config::Config;
 use codex_core::config::TokenBudgetConfig;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -8,6 +9,12 @@ use codex_features::Feature;
 use codex_history_notes_extension::install;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSource;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -19,6 +26,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -290,6 +298,131 @@ async fn exercise_local_history_recovery(recovery_home: RecoveryHome) -> TestRes
     assert!(!note.to_string().contains(USER_CONSTRAINT));
     assert!(!note.to_string().contains(TOOL_ERROR));
     resumed.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_native_child_recovers_its_own_omitted_history_after_new_context() -> TestResult {
+    let server = start_mock_server().await;
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            response(
+                "child-1",
+                ev_function_call(
+                    "child-bad-plan",
+                    "update_plan",
+                    &json!({
+                        "plan": [{"step": "child native failure", "status": TOOL_ERROR}]
+                    })
+                    .to_string(),
+                ),
+            ),
+            response(
+                "child-2",
+                ev_function_call_with_namespace(
+                    "child-save-note",
+                    "local_notes",
+                    "write_file",
+                    &json!({
+                        "path": "INDEX.md",
+                        "text": "Child progress excludes original constraints and tool errors."
+                    })
+                    .to_string(),
+                ),
+            ),
+            response(
+                "child-3",
+                ev_function_call("child-roll-over", "new_context", "{}"),
+            ),
+            response(
+                "child-4",
+                ev_function_call_with_namespace(
+                    "child-find-user",
+                    "local_history",
+                    "search_contents",
+                    &json!({"query": USER_CONSTRAINT, "role": "user"}).to_string(),
+                ),
+            ),
+            response(
+                "child-5",
+                ev_function_call_with_namespace(
+                    "child-find-error",
+                    "local_history",
+                    "search_contents",
+                    &json!({"query": TOOL_ERROR, "role": "tool"}).to_string(),
+                ),
+            ),
+            response(
+                "child-6",
+                ev_assistant_message("child-done", "child recovered"),
+            ),
+        ],
+    )
+    .await;
+    let mut registry = ExtensionRegistryBuilder::<Config>::new();
+    install(
+        &mut registry,
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("synthetic")),
+    );
+    let root = test_codex()
+        .with_extensions(Arc::new(registry.build()))
+        .with_config(configure_local)
+        .build_with_auto_env(&server)
+        .await?;
+    let child_path = AgentPath::root().join("worker")?;
+    let child = root
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.session_configured.thread_id,
+                depth: 1,
+                agent_path: Some(child_path),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            environments: Some(Vec::new()),
+            ..StartThreadOptions::new(root.config.clone())
+        })
+        .await?;
+    child
+        .thread
+        .start_or_steer_turn(codex_core::TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: USER_CONSTRAINT.to_string(),
+                text_elements: Vec::new(),
+            },
+        ]))
+        .await?;
+    wait_for_event(&child.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 6);
+    assert!(!requests[3].body_contains_text(USER_CONSTRAINT));
+    assert!(!requests[3].body_contains_text(TOOL_ERROR));
+    assert!(
+        output(&requests, "child-find-user")?
+            .to_string()
+            .contains(USER_CONSTRAINT)
+    );
+    assert!(
+        output(&requests, "child-find-error")?
+            .to_string()
+            .contains(TOOL_ERROR)
+    );
+    let note_dir = root
+        .config
+        .context_management_local_store_dir
+        .join(child.thread_id.to_string());
+    assert!(note_dir.join("backend.json").is_file());
+    assert!(note_dir.join("notes").join("INDEX.md").is_file());
+
+    child.thread.shutdown_and_wait().await?;
+    root.codex.shutdown_and_wait().await?;
     Ok(())
 }
 

@@ -19,12 +19,14 @@ use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use assert_matches::assert_matches;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::empty_extension_registry;
+use codex_features::ContextManagementBackend;
 use codex_features::Feature;
 use codex_history::CompactedItem;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -45,6 +47,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
@@ -204,6 +207,21 @@ impl AgentControlHarness {
             manager,
             control,
         }
+    }
+
+    async fn new_local() -> Self {
+        let (home, config) = test_config_with_cli_overrides(vec![
+            (
+                "features.context_management.experimental_mode".to_string(),
+                TomlValue::Boolean(true),
+            ),
+            (
+                "features.context_management.backend".to_string(),
+                TomlValue::String("local".to_string()),
+            ),
+        ])
+        .await;
+        Self::new_with_config(home, config).await
     }
 
     async fn start_thread(&self) -> (ThreadId, Arc<CodexThread>) {
@@ -1383,6 +1401,499 @@ async fn spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginate
         .submit(Op::Shutdown {})
         .await
         .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn fresh_local_children_are_isolated_and_resume_with_native_identity() {
+    let harness = AgentControlHarness::new_local().await;
+    let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let reviewer_path = AgentPath::root().join("reviewer").expect("reviewer path");
+    let spawn = |agent_path: AgentPath, role: &str| {
+        harness.control.spawn_agent(
+            harness.config.clone(),
+            text_input("fresh local child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path),
+                agent_nickname: None,
+                agent_role: Some(role.to_string()),
+            })),
+        )
+    };
+    let worker_id = spawn(worker_path.clone(), "worker")
+        .await
+        .expect("worker spawn should succeed");
+    let reviewer_id = spawn(reviewer_path, "reviewer")
+        .await
+        .expect("reviewer spawn should succeed");
+    let worker = harness
+        .manager
+        .get_thread(worker_id)
+        .await
+        .expect("worker should exist");
+    let reviewer = harness
+        .manager
+        .get_thread(reviewer_id)
+        .await
+        .expect("reviewer should exist");
+    persist_thread_for_tree_resume(&worker, "worker-only constraint 71c9").await;
+    persist_thread_for_tree_resume(&reviewer, "reviewer-only tool error 29af").await;
+
+    for (thread_id, thread) in [(worker_id, &worker), (reviewer_id, &reviewer)] {
+        let rollout_path = thread
+            .rollout_path()
+            .expect("local child rollout should exist");
+        let meta = codex_rollout::read_session_meta_line(&rollout_path)
+            .await
+            .expect("read local child metadata");
+        assert_eq!(
+            meta.meta.context_management_backend,
+            Some(ContextManagementBackend::Local)
+        );
+        let marker = std::fs::read_to_string(
+            harness
+                .config
+                .context_management_local_store_dir
+                .join(thread_id.to_string())
+                .join("backend.json"),
+        )
+        .expect("local child marker should exist");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&marker).unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "backend": "local",
+                "thread_id": thread_id.to_string(),
+            })
+        );
+    }
+    assert!(history_contains_text(
+        worker.session.clone_history().await.raw_items(),
+        "worker-only constraint 71c9",
+    ));
+    assert!(!history_contains_text(
+        worker.session.clone_history().await.raw_items(),
+        "reviewer-only tool error 29af",
+    ));
+    assert!(history_contains_text(
+        reviewer.session.clone_history().await.raw_items(),
+        "reviewer-only tool error 29af",
+    ));
+    assert!(!history_contains_text(
+        reviewer.session.clone_history().await.raw_items(),
+        "worker-only constraint 71c9",
+    ));
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(worker_id)
+        .await
+        .expect("worker shutdown should submit");
+    let resumed_id = harness
+        .control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            worker_id,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            }),
+        )
+        .await
+        .expect("local child resume should succeed");
+    assert_eq!(resumed_id, worker_id);
+    let resumed = harness
+        .manager
+        .get_thread(resumed_id)
+        .await
+        .expect("resumed worker should exist");
+    assert_eq!(
+        resumed
+            .session
+            .get_config()
+            .await
+            .context_management_backend,
+        ContextManagementBackend::Local
+    );
+    let snapshot = resumed.config_snapshot().await;
+    let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: resumed_parent,
+        agent_path: resumed_path,
+        agent_role: resumed_role,
+        ..
+    }) = snapshot.session_source
+    else {
+        panic!("expected resumed thread-spawn source");
+    };
+    assert_eq!(resumed_parent, parent_thread_id);
+    assert_eq!(resumed_path, Some(worker_path));
+    assert_eq!(resumed_role.as_deref(), Some("worker"));
+    assert!(history_contains_text(
+        resumed.session.clone_history().await.raw_items(),
+        "worker-only constraint 71c9",
+    ));
+    assert!(!history_contains_text(
+        resumed.session.clone_history().await.raw_items(),
+        "reviewer-only tool error 29af",
+    ));
+
+    let _ = harness.control.shutdown_live_agent(resumed_id).await;
+    let _ = harness.control.shutdown_live_agent(reviewer_id).await;
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
+}
+
+#[tokio::test]
+async fn local_child_resume_validates_canonical_identity_before_registration() {
+    let harness = AgentControlHarness::new_local().await;
+    let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
+    let child_path = AgentPath::root()
+        .join("identity_worker")
+        .expect("child path");
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(child_path.clone()),
+        agent_nickname: None,
+        agent_role: Some("identity_worker".to_string()),
+    });
+    let child_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("identity validation fixture"),
+            Some(child_source.clone()),
+        )
+        .await
+        .expect("spawn local child");
+    let child = harness.manager.get_thread(child_id).await.expect("child");
+    persist_thread_for_tree_resume(&child, "persist canonical identity").await;
+    let rollout_path = child.rollout_path().expect("child rollout");
+    harness
+        .control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("shutdown child");
+    let original = std::fs::read_to_string(&rollout_path).expect("read rollout");
+    let (head, suffix) = original.split_once('\n').expect("metadata line");
+    let head: serde_json::Value = serde_json::from_str(head).expect("metadata JSON");
+    for (field, value) in [
+        (
+            "parent_thread_id",
+            serde_json::json!(ThreadId::new().to_string()),
+        ),
+        ("agent_path", serde_json::json!("/root/wrong_worker")),
+        ("agent_role", serde_json::json!("wrong_worker")),
+        ("thread_source", serde_json::json!("cli")),
+    ] {
+        let mut conflicting = head.clone();
+        conflicting["payload"][field] = value;
+        std::fs::write(&rollout_path, format!("{conflicting}\n{suffix}"))
+            .expect("write synthetic identity conflict");
+        let error = harness
+            .control
+            .resume_agent_from_rollout(harness.config.clone(), child_id, child_source.clone())
+            .await
+            .expect_err("conflicting durable identity must not resume from cached metadata");
+        assert!(
+            error
+                .to_string()
+                .contains("stored child identity conflicts"),
+            "{field}: {error}"
+        );
+        assert!(harness.manager.get_thread(child_id).await.is_err());
+    }
+    std::fs::write(&rollout_path, &original).expect("restore synthetic canonical head");
+    for field in ["parent_thread_id", "agent_path", "agent_role"] {
+        let mut requested = child_source.clone();
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: requested_parent,
+            agent_path: requested_path,
+            agent_role: requested_role,
+            ..
+        }) = &mut requested
+        else {
+            panic!("expected child source");
+        };
+        match field {
+            "parent_thread_id" => *requested_parent = ThreadId::new(),
+            "agent_path" => *requested_path = Some(AgentPath::root().join("wrong_worker").unwrap()),
+            "agent_role" => *requested_role = Some("wrong_worker".to_string()),
+            _ => unreachable!(),
+        }
+        let error = harness
+            .control
+            .resume_agent_from_rollout(harness.config.clone(), child_id, requested)
+            .await
+            .expect_err("caller cannot replace canonical child identity");
+        assert!(
+            error
+                .to_string()
+                .contains("requested child identity conflicts"),
+            "{field}: {error}"
+        );
+        assert!(harness.manager.get_thread(child_id).await.is_err());
+    }
+    for structured_only in [true, false] {
+        let mut compatible = head.clone();
+        if structured_only {
+            let payload = compatible["payload"]
+                .as_object_mut()
+                .expect("metadata payload");
+            for field in [
+                "parent_thread_id",
+                "agent_path",
+                "agent_role",
+                "thread_source",
+            ] {
+                payload.remove(field);
+            }
+        } else {
+            compatible["payload"]["source"] = serde_json::json!("cli");
+        }
+        std::fs::write(&rollout_path, format!("{compatible}\n{suffix}"))
+            .expect("write one-sided historical identity");
+        let resumed_id = harness
+            .control
+            .resume_agent_from_rollout(harness.config.clone(), child_id, child_source.clone())
+            .await
+            .expect("one-sided historical identity must remain compatible");
+        assert_eq!(resumed_id, child_id);
+        let resumed = harness
+            .manager
+            .get_thread(child_id)
+            .await
+            .expect("resumed child");
+        let snapshot = resumed.config_snapshot().await;
+        assert_eq!(
+            snapshot.session_source.get_agent_path(),
+            Some(child_path.clone())
+        );
+        assert_eq!(
+            snapshot.session_source.get_agent_role().as_deref(),
+            Some("identity_worker")
+        );
+        harness
+            .control
+            .shutdown_live_agent(child_id)
+            .await
+            .expect("shutdown resumed child");
+    }
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
+}
+
+#[tokio::test]
+async fn internal_sources_do_not_inherit_local_context_or_model_budget_activation() {
+    let harness = AgentControlHarness::new_local().await;
+    let mut config = harness.config.clone();
+    let mut model = bundled_models_response()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("bundled Sol");
+    model.slug = "internal-local-context-fixture".to_string();
+    model
+        .model_messages
+        .as_mut()
+        .and_then(|messages| messages.token_budget.as_mut())
+        .expect("Sol budget defaults")
+        .enabled = true;
+    config.model = Some(model.slug.clone());
+    config.model_catalog = Some(ModelsResponse {
+        models: vec![model],
+    });
+    for source in [
+        SessionSource::SubAgent(SubAgentSource::Review),
+        SessionSource::Internal(codex_protocol::protocol::InternalSessionSource::Guardian),
+    ] {
+        let started = harness
+            .manager
+            .start_thread(StartThreadOptions {
+                session_source: Some(source),
+                ..StartThreadOptions::new(config.clone())
+            })
+            .await
+            .expect("ordinary internal thread should start");
+        let id = started.thread_id;
+        let thread = started.thread;
+        let actual = thread.session.get_config().await;
+        assert_eq!(
+            actual.context_management_backend,
+            ContextManagementBackend::Codex
+        );
+        assert!(!actual.features.enabled(Feature::ContextManagement));
+        assert!(!actual.features.enabled(Feature::TokenBudget));
+        assert!(actual.token_budget.is_none());
+        assert!(
+            !config
+                .context_management_local_store_dir
+                .join(id.to_string())
+                .exists()
+        );
+        let _ = thread.submit(Op::Shutdown {}).await;
+    }
+}
+
+#[tokio::test]
+async fn resumed_children_override_the_parent_local_activation_with_their_recorded_backend() {
+    let harness = AgentControlHarness::new_local().await;
+    let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
+    let child_source = |role: &str| {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: Some(AgentPath::root().join(role).expect("child path")),
+            agent_nickname: None,
+            agent_role: Some(role.to_string()),
+        })
+    };
+
+    let local_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("recorded local child"),
+            Some(child_source("local_worker")),
+        )
+        .await
+        .expect("local child spawn should succeed");
+    let mut ordinary_config = harness.config.clone();
+    ordinary_config.context_management_backend = ContextManagementBackend::Codex;
+    ordinary_config
+        .features
+        .disable(Feature::ContextManagement)
+        .expect("ordinary child context-management feature should disable");
+    ordinary_config
+        .features
+        .disable(Feature::TokenBudget)
+        .expect("ordinary child token-budget feature should disable");
+    ordinary_config.token_budget = None;
+    let ordinary_id = harness
+        .control
+        .spawn_agent(
+            ordinary_config,
+            text_input("recorded ordinary child"),
+            Some(child_source("ordinary_worker")),
+        )
+        .await
+        .expect("ordinary child spawn should succeed");
+
+    for (thread_id, message) in [
+        (local_id, "local child persisted"),
+        (ordinary_id, "ordinary child persisted"),
+    ] {
+        let thread = harness
+            .manager
+            .get_thread(thread_id)
+            .await
+            .expect("child should exist");
+        persist_thread_for_tree_resume(&thread, message).await;
+        harness
+            .control
+            .shutdown_live_agent(thread_id)
+            .await
+            .expect("child shutdown should submit");
+    }
+
+    let mut local_parent_with_model_defaults = harness.config.clone();
+    let mut model_with_enabled_defaults = bundled_models_response()
+        .expect("bundled models should parse")
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("bundled Sol model should exist");
+    model_with_enabled_defaults.slug = "ordinary_resume_model_defaults".to_string();
+    model_with_enabled_defaults
+        .model_messages
+        .as_mut()
+        .and_then(|messages| messages.token_budget.as_mut())
+        .expect("synthetic model should retain token-budget defaults")
+        .enabled = true;
+    local_parent_with_model_defaults.model = Some(model_with_enabled_defaults.slug.clone());
+    local_parent_with_model_defaults.model_catalog = Some(ModelsResponse {
+        models: vec![model_with_enabled_defaults],
+    });
+    let resumed_ordinary_id = harness
+        .control
+        .resume_agent_from_rollout(
+            local_parent_with_model_defaults,
+            ordinary_id,
+            child_source("ordinary_worker"),
+        )
+        .await
+        .expect("ordinary child resume should succeed");
+    let resumed_ordinary = harness
+        .manager
+        .get_thread(resumed_ordinary_id)
+        .await
+        .expect("resumed ordinary child should exist");
+    let resumed_ordinary_config = resumed_ordinary.session.get_config().await;
+    assert_eq!(
+        resumed_ordinary_config.context_management_backend,
+        ContextManagementBackend::Codex
+    );
+    assert!(
+        !resumed_ordinary_config
+            .features
+            .enabled(Feature::ContextManagement)
+    );
+    assert!(
+        !resumed_ordinary_config
+            .features
+            .enabled(Feature::TokenBudget)
+    );
+    assert_eq!(resumed_ordinary_config.token_budget, None);
+
+    let mut parent_codex_config = harness.config.clone();
+    parent_codex_config.context_management_backend = ContextManagementBackend::Codex;
+    parent_codex_config
+        .features
+        .disable(Feature::ContextManagement)
+        .expect("parent context-management feature should disable");
+    parent_codex_config
+        .features
+        .disable(Feature::TokenBudget)
+        .expect("parent token-budget feature should disable");
+    parent_codex_config.token_budget = None;
+    let resumed_local_id = harness
+        .control
+        .resume_agent_from_rollout(parent_codex_config, local_id, child_source("local_worker"))
+        .await
+        .expect("local child resume should preserve its recorded backend");
+    let resumed_local = harness
+        .manager
+        .get_thread(resumed_local_id)
+        .await
+        .expect("resumed local child should exist");
+    let resumed_local_config = resumed_local.session.get_config().await;
+    assert_eq!(
+        resumed_local_config.context_management_backend,
+        ContextManagementBackend::Local
+    );
+    assert!(
+        resumed_local_config
+            .features
+            .enabled(Feature::ContextManagement)
+    );
+    assert!(resumed_local_config.features.enabled(Feature::TokenBudget));
+    assert!(
+        resumed_local_config
+            .token_budget
+            .as_ref()
+            .is_some_and(|config| config.use_history_notes_extension)
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(resumed_ordinary_id)
+        .await;
+    let _ = harness.control.shutdown_live_agent(resumed_local_id).await;
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
 }
 
 #[tokio::test]
