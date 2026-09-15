@@ -24,6 +24,55 @@ fn header(thread_id: ThreadId) -> String {
 }
 
 #[tokio::test]
+async fn fresh_child_parent_identity_does_not_imply_inherited_history() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("rollout.jsonl");
+    let id = ThreadId::new();
+    let mut meta = serde_json::to_value(SessionMeta {
+        id,
+        parent_thread_id: Some(ThreadId::new()),
+        ..SessionMeta::default()
+    })
+    .unwrap();
+    let own_output = record(
+        1,
+        "response_item",
+        json!({"type": "function_call_output", "call_id": "child-call", "output": "child-only-error"}),
+    );
+    std::fs::write(&path, record(0, "session_meta", meta.clone()) + &own_output).unwrap();
+    let result = scan_rollout(&path, id).await.unwrap();
+    assert!(result.info.complete);
+    assert!(!result.info.lineage_unavailable);
+    assert_eq!(
+        result.entries[0].projection.content.as_deref(),
+        Some("child-only-error")
+    );
+    assert!(scan_rollout(&path, ThreadId::new()).await.is_err());
+
+    // Actual inheritance evidence still rejects even with a fresh parent ID.
+    for (field, value) in [
+        (
+            "history_base",
+            json!({"thread_id": ThreadId::new(), "end_ordinal_exclusive":7,"end_byte_offset":0}),
+        ),
+        ("forked_from_id", json!(ThreadId::new())),
+        ("forked_from_ordinal_exclusive", json!(7)),
+        ("subagent_history_start_ordinal", json!(7)),
+    ] {
+        meta[field] = value;
+        std::fs::write(&path, record(0, "session_meta", meta.clone()) + &own_output).unwrap();
+        assert!(
+            scan_rollout(&path, id)
+                .await
+                .unwrap()
+                .info
+                .lineage_unavailable
+        );
+        meta[field] = json!(null);
+    }
+}
+
+#[tokio::test]
 async fn originals_keep_ordinals_and_windows_across_compaction() {
     let home = TempDir::new().unwrap();
     let path = home.path().join("rollout.jsonl");
@@ -155,4 +204,51 @@ async fn oversized_record_stops_with_explicit_incomplete_scan() {
     assert!(!result.info.corrupt);
     assert!(result.entries.is_empty());
     assert!(!result.info.errors.is_empty());
+}
+
+#[tokio::test]
+async fn encrypted_projection_only_replays_native_agent_messages_and_keeps_replacement_identity() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("rollout.jsonl");
+    let id = ThreadId::new();
+    let mixed = json!({"type":"agent_message", "author":"/root", "recipient":"/root/child", "content":[
+        {"type":"input_text", "text":"parent metadata"},
+        {"type":"encrypted_content", "encrypted_content":"native-first"},
+        {"type":"encrypted_content", "encrypted_content":"native-second"}
+    ]});
+    let hidden = vec![
+        json!({"type":"reasoning", "summary":[], "encrypted_content":"hidden-reasoning"}),
+        json!({"type":"function_call", "name":"opaque", "call_id":"opaque-call", "arguments":"{}", "encrypted_function_args":["hidden-args"]}),
+        json!({"type":"function_call_output", "call_id":"opaque-call", "output":[{"type":"encrypted_content", "encrypted_content":"hidden-output"}]}),
+        json!({"type":"compaction", "encrypted_content":"hidden-compaction"}),
+    ];
+    let mut text = header(id) + &record(1, "response_item", mixed.clone());
+    for (index, item) in hidden.into_iter().enumerate() {
+        text += &record(index as u64 + 2, "response_item", item);
+    }
+    text += &record(
+        6,
+        "compacted",
+        json!({"message":"", "replacement_history":[mixed], "window_number":1}),
+    );
+    std::fs::write(&path, text).unwrap();
+    let scan = scan_rollout(&path, id).await.unwrap();
+    assert!(scan.info.complete, "{:?}", scan.info.errors);
+    let replayable: Vec<_> = scan
+        .entries
+        .iter()
+        .filter(|entry| !entry.projection.agent_message_encrypted_parts.is_empty())
+        .collect();
+    assert_eq!(replayable.len(), 2);
+    for entry in &replayable {
+        assert_eq!(
+            entry.projection.agent_message_encrypted_parts,
+            vec!["native-first", "native-second"]
+        );
+        assert_eq!(entry.projection.content.as_deref(), Some("parent metadata"));
+    }
+    assert_eq!(replayable[0].item_id, "ordinal:1");
+    assert_eq!(replayable[1].item_id, "ordinal:6:replacement:0");
+    assert_eq!(replayable[1].source.replacement_index, Some(0));
+    assert_ne!(replayable[0].window_id, replayable[1].window_id);
 }

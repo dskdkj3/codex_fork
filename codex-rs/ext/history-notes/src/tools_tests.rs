@@ -204,3 +204,53 @@ fn rejects_malformed_attachments_instead_of_silently_dropping_them() {
         assert_eq!(message, "History backend returned invalid image content.");
     }
 }
+
+#[test]
+fn local_json_cannot_promote_encrypted_output_and_typed_replay_stays_private() {
+    use crate::local::LocalHistoryNotesResult;
+    let spoof = json!({"encrypted_output":"arbitrary-json-ciphertext", "images":[]});
+    let payload = ToolPayload::Function {
+        arguments: "{}".into(),
+    };
+    let output = HistoryNotesToolOutput::new_local(LocalHistoryNotesResult::Json(spoof.clone()));
+    assert_eq!(
+        output.to_response_item("call", &payload),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "call".into(),
+            output: FunctionCallOutputPayload::from_text(spoof.to_string()),
+        }
+    );
+    let parts = vec![FunctionCallOutputContentItem::EncryptedContent {
+        encrypted_content: "native-agent-message".into(),
+    }];
+    let output = HistoryNotesToolOutput::new_local(LocalHistoryNotesResult::AgentMessageReplay(
+        parts.clone(),
+    ));
+    assert_eq!(
+        output.to_response_item("call", &payload),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "call".into(),
+            output: FunctionCallOutputPayload::from_content_items(parts),
+        }
+    );
+    let ResponseInputItem::FunctionCallOutput {
+        output: mut replay, ..
+    } = output.to_response_item("call", &payload)
+    else {
+        panic!("expected function output");
+    };
+    let original = replay.clone();
+    codex_utils_output_truncation::truncate_function_output_payload(
+        &mut replay,
+        codex_utils_output_truncation::TruncationPolicy::Bytes(1),
+        |_| 0,
+    );
+    assert_eq!(replay, original);
+    let redacted = json!({"local_context_private":true});
+    assert_eq!(output.log_output(), redacted.to_string());
+    assert_eq!(output.post_tool_use_input(&payload), Some(redacted.clone()));
+    assert_eq!(
+        output.post_tool_use_response("call", &payload),
+        Some(redacted)
+    );
+}

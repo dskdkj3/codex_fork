@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::local::LocalHistoryNotesResult;
 use crate::local::LocalHistoryNotesStore;
 use codex_api::ReqwestTransport;
 use codex_client::HttpTransport;
@@ -17,6 +18,12 @@ const HISTORY_NOTES_BACKEND_TIMEOUT: Duration = Duration::from_secs(35);
 const ENCRYPTED_TOOL_ARGUMENTS_HEADER: &str = "x-openai-encrypted-tool-arguments";
 const TOOL_OUTPUT_TRUNCATION_POLICY_HEADER: &str = "x-openai-tool-output-truncation-policy";
 const OPERATION_ERROR_PREFIX: &str = "Unable to perform operation:";
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum HistoryNotesBackendResult {
+    Codex(Value),
+    Local(LocalHistoryNotesResult),
+}
 
 #[derive(Clone)]
 pub(crate) struct HistoryNotesBackend {
@@ -53,24 +60,26 @@ impl HistoryNotesBackend {
         current_agent_name: &str,
         mut arguments: Value,
         truncation_policy: TruncationPolicy,
-    ) -> Result<Value, String> {
+    ) -> Result<HistoryNotesBackendResult, String> {
         if !arguments.is_object() {
             return Err("History tool arguments must be a JSON object".to_string());
         }
         let provider = match &self.kind {
             BackendKind::Local(store) => {
                 let result = if path == "alpha/notes/v2/thread_hint" {
-                    store.thread_hint()
+                    LocalHistoryNotesResult::Json(store.thread_hint())
                 } else {
                     store.call(path, arguments).await?
                 };
-                if result.to_string().len() > 8_000 {
+                if let LocalHistoryNotesResult::Json(value) = &result
+                    && value.to_string().len() > 8_000
+                {
                     return Err(
                         "Local context result exceeds the output limit; request a smaller range."
                             .to_string(),
                     );
                 }
-                return Ok(result);
+                return Ok(HistoryNotesBackendResult::Local(result));
             }
             BackendKind::Codex(provider) => provider,
         };
@@ -128,6 +137,7 @@ impl HistoryNotesBackend {
             .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
 
         serde_json::from_slice(&response.body)
+            .map(HistoryNotesBackendResult::Codex)
             .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend returned invalid JSON."))
     }
 }

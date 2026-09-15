@@ -304,7 +304,6 @@ pub(crate) async fn scan_rollout(path: &Path, thread_id: ThreadId) -> Result<Sca
             state.info.lineage_unavailable = meta_line.meta.history_base.is_some()
                 || meta_line.meta.forked_from_id.is_some()
                 || meta_line.meta.forked_from_ordinal_exclusive.is_some()
-                || meta_line.meta.parent_thread_id.is_some()
                 || meta_line.meta.subagent_history_start_ordinal.is_some();
             state.ordinal_floor = lineage_ordinal_floor(meta_line);
             state.ensure_window(

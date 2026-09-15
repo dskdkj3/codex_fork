@@ -145,6 +145,15 @@ impl ContextContributor for HistoryNotesExtension {
             else {
                 return Vec::new();
             };
+            let result = match result {
+                crate::backend::HistoryNotesBackendResult::Codex(value)
+                | crate::backend::HistoryNotesBackendResult::Local(
+                    crate::local::LocalHistoryNotesResult::Json(value),
+                ) => value,
+                crate::backend::HistoryNotesBackendResult::Local(
+                    crate::local::LocalHistoryNotesResult::AgentMessageReplay(_),
+                ) => return Vec::new(),
+            };
             let Some(text) = result.get("text").and_then(serde_json::Value::as_str) else {
                 return Vec::new();
             };

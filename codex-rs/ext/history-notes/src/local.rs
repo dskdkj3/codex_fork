@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_protocol::ThreadId;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_thread_store::ThreadStore;
 use serde_json::Value;
 use serde_json::json;
@@ -22,6 +23,13 @@ use notes::LocalNoteStore;
 
 pub(crate) const MAX_LOCAL_ARGUMENT_BYTES: usize = 4_000;
 pub(crate) const MAX_NOTE_CALL_TEXT_BYTES: usize = 3_000;
+
+/// A local result can replay only a typed, exactly selected native AgentMessage.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LocalHistoryNotesResult {
+    Json(Value),
+    AgentMessageReplay(Vec<FunctionCallOutputContentItem>),
+}
 
 /// Small internal API consumed by the history-notes backend selector.
 #[derive(Clone)]
@@ -47,15 +55,19 @@ impl LocalHistoryNotesStore {
 
     /// Executes one of the existing nine semantic operations.
     ///
-    /// Results are ordinary JSON values. Expected missing, opaque, corrupt,
+    /// Results are JSON or an atomic typed native AgentMessage replay. Expected missing, opaque, corrupt,
     /// and unsupported states are represented in the value instead of being
     /// collapsed into an empty successful response.
-    pub(crate) async fn call(&self, endpoint: &str, arguments: Value) -> Result<Value, String> {
+    pub(crate) async fn call(
+        &self,
+        endpoint: &str,
+        arguments: Value,
+    ) -> Result<LocalHistoryNotesResult, String> {
         if arguments.to_string().len() > MAX_LOCAL_ARGUMENT_BYTES {
-            return Ok(limits::invalid_argument(
+            return Ok(LocalHistoryNotesResult::Json(limits::invalid_argument(
                 "arguments",
                 "local call JSON exceeds 4000 UTF-8 bytes",
-            ));
+            )));
         }
         if matches!(
             endpoint,
@@ -65,19 +77,21 @@ impl LocalHistoryNotesStore {
             .and_then(Value::as_str)
             .is_some_and(|text| text.len() > MAX_NOTE_CALL_TEXT_BYTES)
         {
-            return Ok(limits::invalid_argument(
+            return Ok(LocalHistoryNotesResult::Json(limits::invalid_argument(
                 "text",
                 "local note text exceeds 3000 UTF-8 bytes per call; append smaller chunks",
-            ));
+            )));
         }
         if let Some(error) = self.reject_foreign_agent(&arguments) {
-            return Ok(error);
+            return Ok(LocalHistoryNotesResult::Json(error));
         }
 
-        match endpoint {
+        if endpoint == "alpha/history/v2/read_item" {
+            return self.history.read_item(&arguments).await;
+        }
+        let result = match endpoint {
             "alpha/history/v2/list_windows" => self.history.list_windows(&arguments).await,
             "alpha/history/v2/list_items" => self.history.list_items(&arguments).await,
-            "alpha/history/v2/read_item" => self.history.read_item(&arguments).await,
             "alpha/history/v2/search_contents" => self.history.search_contents(&arguments).await,
             "alpha/notes/v2/list_files_by_prefix" => self.notes.list_files(&arguments),
             "alpha/notes/v2/read_file" => self.notes.read_file(&arguments),
@@ -87,7 +101,8 @@ impl LocalHistoryNotesStore {
             _ => Err(format!(
                 "unsupported local history-notes endpoint: {endpoint}"
             )),
-        }
+        }?;
+        Ok(LocalHistoryNotesResult::Json(result))
     }
 
     /// Returns a bounded recovery hint for the existing context contribution

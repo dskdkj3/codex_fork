@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use super::LocalHistoryNotesResult;
 use codex_protocol::ThreadId;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ThreadStore;
 use serde_json::Value;
@@ -154,7 +156,10 @@ impl LocalHistoryReader {
         Ok(result.unwrap_or_else(|error| error))
     }
 
-    pub(super) async fn read_item(&self, arguments: &Value) -> Result<Value, String> {
+    pub(super) async fn read_item(
+        &self,
+        arguments: &Value,
+    ) -> Result<LocalHistoryNotesResult, String> {
         let result = async {
             let item_id = arguments.get("item_id").and_then(Value::as_str)
                 .ok_or_else(|| limits::invalid_argument("item_id", "must be a returned item ID"))?;
@@ -171,12 +176,28 @@ impl LocalHistoryReader {
                 let mut result = scan_metadata(&scan);
                 result["status"] = json!("unavailable");
                 result["reason"] = json!("item_not_found_in_scanned_history");
-                return Ok(result);
+                return Ok(LocalHistoryNotesResult::Json(result));
             };
             let mut result = entry_metadata(entry);
+            if !entry.projection.agent_message_encrypted_parts.is_empty() {
+                if offset != 0 {
+                    return Ok(LocalHistoryNotesResult::Json(limits::invalid_argument(
+                        "offset_chars", "encrypted agent messages must be read atomically at offset 0",
+                    )));
+                }
+                let parts: Vec<_> = entry.projection.agent_message_encrypted_parts.iter().map(|encrypted_content| {
+                    FunctionCallOutputContentItem::EncryptedContent { encrypted_content: encrypted_content.clone() }
+                }).collect();
+                // Ciphertext is exempt from normal text truncation, so enforce
+                // the complete serialized payload bound before native replay.
+                if serde_json::to_vec(&parts).map_err(|_| json!({"status": "unavailable", "reason": "encrypted_item_encoding_failed"}))?.len() > limits::MAX_HISTORY_RESULT_BYTES {
+                    return Ok(LocalHistoryNotesResult::Json(json!({"status": "unavailable", "reason": "encrypted_item_exceeds_replay_limit"})));
+                }
+                return Ok(LocalHistoryNotesResult::AgentMessageReplay(parts));
+            }
             let Some(text) = &entry.projection.content else {
                 result["status"] = json!("unavailable");
-                return Ok(result);
+                return Ok(LocalHistoryNotesResult::Json(result));
             };
             loop {
                 let (content, consumed, truncated) = limits::char_slice(text, offset, limit);
@@ -188,12 +209,12 @@ impl LocalHistoryReader {
                 if result.to_string().len() <= limits::MAX_HISTORY_RESULT_BYTES { break; }
                 limit /= 2;
                 if limit == 0 {
-                    return Ok(json!({"status": "unavailable", "reason": "item_metadata_exceeds_output_limit"}));
+                    return Ok(LocalHistoryNotesResult::Json(json!({"status": "unavailable", "reason": "item_metadata_exceeds_output_limit"})));
                 }
             }
-            Ok(result)
+            Ok(LocalHistoryNotesResult::Json(result))
         }.await;
-        Ok(result.unwrap_or_else(|error| error))
+        Ok(result.unwrap_or_else(LocalHistoryNotesResult::Json))
     }
 }
 
@@ -217,6 +238,7 @@ fn entry_metadata(entry: &HistoryEntry) -> Value {
         "unavailable_reason": entry.projection.unavailable_reason,
         "source": {"ordinal": entry.source.ordinal, "physical_record": entry.source.physical_record,
             "replacement_index": entry.source.replacement_index},
+        "encrypted_agent_message_replay": !entry.projection.agent_message_encrypted_parts.is_empty(),
         "opaque": entry.projection.opaque, "source_truncated": entry.projection.content_truncated})
 }
 

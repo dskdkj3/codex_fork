@@ -94,7 +94,7 @@ impl HistoryNotesAction {
                 "List original history items with bounded previews and source references."
             }
             Self::HistoryReadItem => {
-                "Read a character range from an original history item using its returned IDs."
+                "Read an original item using its returned IDs. Text supports character ranges. Encrypted agent messages replay atomically at offset 0 (8000 serialized bytes maximum); use list_items to find them because encrypted text is not searchable."
             }
             Self::HistorySearchContents => {
                 "Find a literal substring in this thread's original history, including textual tool results."
@@ -367,8 +367,14 @@ impl HistoryNotesTool {
             .await
             .map_err(FunctionCallError::RespondToModel)?;
 
-        let mut output = HistoryNotesToolOutput::new(result)?;
-        output.redact_observers = self.backend.is_local();
+        let output = match result {
+            crate::backend::HistoryNotesBackendResult::Codex(value) => {
+                HistoryNotesToolOutput::new(value)?
+            }
+            crate::backend::HistoryNotesBackendResult::Local(value) => {
+                HistoryNotesToolOutput::new_local(value)
+            }
+        };
         Ok(Box::new(output))
     }
 }

@@ -24,6 +24,7 @@ pub(crate) struct ProjectedItem {
     pub(crate) tool_name: Option<String>,
     pub(crate) call_id: Option<String>,
     pub(crate) content: Option<String>,
+    pub(crate) agent_message_encrypted_parts: Vec<String>,
     pub(crate) content_truncated: bool,
     pub(crate) opaque: bool,
     pub(crate) unavailable_reason: Option<String>,
@@ -38,6 +39,7 @@ impl ProjectedItem {
             tool_name: None,
             call_id: None,
             content: Some(content.into()),
+            agent_message_encrypted_parts: Vec::new(),
             content_truncated: false,
             opaque: false,
             unavailable_reason: None,
@@ -52,6 +54,7 @@ impl ProjectedItem {
             tool_name: None,
             call_id: None,
             content: None,
+            agent_message_encrypted_parts: Vec::new(),
             content_truncated: false,
             opaque: true,
             unavailable_reason: Some(reason.to_string()),
@@ -151,14 +154,24 @@ pub(crate) fn project_response_item(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if text.trim().is_empty() {
+            let mut projection = if text.trim().is_empty() {
                 ProjectedItem::opaque("assistant", "agent_message", "encrypted_or_non_text")
             } else if has_opaque_parts {
                 ProjectedItem::text("assistant", "agent_message", text)
                     .with_opaque_parts("mixed_text_and_encrypted_content")
             } else {
                 ProjectedItem::text("assistant", "agent_message", text)
-            }
+            };
+            projection.agent_message_encrypted_parts = content
+                .iter()
+                .filter_map(|part| match part {
+                    AgentMessageInputContent::EncryptedContent { encrypted_content } => {
+                        Some(encrypted_content.clone())
+                    }
+                    AgentMessageInputContent::InputText { .. } => None,
+                })
+                .collect();
+            projection
         }
         ResponseItem::FunctionCall {
             name,

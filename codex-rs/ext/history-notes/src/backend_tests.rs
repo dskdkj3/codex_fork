@@ -62,7 +62,10 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
         .await
         .expect("History request should succeed");
 
-    assert_eq!(response, json!({"encrypted_output": "enc_payload"}));
+    assert_eq!(
+        response,
+        super::HistoryNotesBackendResult::Codex(json!({"encrypted_output": "enc_payload"}))
+    );
     let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(requests.len(), 1);
     assert!(

@@ -69,6 +69,24 @@ impl HistoryNotesToolOutput {
 }
 
 impl HistoryNotesToolOutput {
+    pub(crate) fn new_local(result: crate::local::LocalHistoryNotesResult) -> Self {
+        let (result, output) = match result {
+            crate::local::LocalHistoryNotesResult::Json(value) => {
+                let output = FunctionCallOutputPayload::from_text(value.to_string());
+                (value, output)
+            }
+            crate::local::LocalHistoryNotesResult::AgentMessageReplay(parts) => (
+                json!({"local_context_private": true}),
+                FunctionCallOutputPayload::from_content_items(parts),
+            ),
+        };
+        Self {
+            result,
+            output,
+            redact_observers: true,
+        }
+    }
+
     fn observer_result(&self) -> Value {
         if self.redact_observers {
             json!({"local_context_private": true})
