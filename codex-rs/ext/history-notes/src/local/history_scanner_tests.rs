@@ -231,8 +231,28 @@ async fn encrypted_projection_only_replays_native_agent_messages_and_keeps_repla
         "compacted",
         json!({"message":"", "replacement_history":[mixed], "window_number":1}),
     );
+    let legacy_encrypted = codex_protocol::protocol::InterAgentCommunication::new_encrypted(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::root().join("child").unwrap(),
+        Vec::new(),
+        "legacy-hidden-message".into(),
+        /*trigger_turn*/ false,
+    );
+    text += &record(
+        7,
+        "inter_agent_communication",
+        serde_json::to_value(legacy_encrypted).unwrap(),
+    );
     std::fs::write(&path, text).unwrap();
     let scan = scan_rollout(&path, id).await.unwrap();
+    let legacy = scan
+        .entries
+        .iter()
+        .find(|entry| entry.item_id == "ordinal:7")
+        .unwrap();
+    assert!(legacy.projection.opaque);
+    assert_eq!(legacy.projection.content, None);
+    assert!(legacy.projection.agent_message_encrypted_parts.is_empty());
     assert!(scan.info.complete, "{:?}", scan.info.errors);
     let replayable: Vec<_> = scan
         .entries
