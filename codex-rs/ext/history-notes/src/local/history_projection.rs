@@ -120,6 +120,7 @@ pub(crate) fn project_rollout_item(
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::RetainedContext(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     }
@@ -261,6 +262,9 @@ pub(crate) fn project_response_item(
         }
         ResponseItem::CompactionTrigger { .. } => {
             ProjectedItem::opaque("system", "compaction_trigger", "control_record")
+        }
+        ResponseItem::ConfigurationUpdate { .. } => {
+            ProjectedItem::opaque("system", "configuration_update", "control_record")
         }
         ResponseItem::ContextCompaction { .. } => {
             ProjectedItem::opaque("system", "context_compaction", "encrypted_compaction")

@@ -1,6 +1,6 @@
 # Local context backend
 
-This fork is based on `rust-v0.153.2` (`657a993cbee87acf52d14b758ce49dbd46d1b8eb`).
+This fork is based on `rust-v0.156.1` (explicit upstream release tag).
 It adds a local backend to the existing experimental context-management tools.
 Synthetic native acceptance tests cover manual and automatic rollover, omitted
 original user/tool text recovery, and restarting the same thread. A local build

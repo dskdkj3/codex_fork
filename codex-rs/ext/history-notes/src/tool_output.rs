@@ -4,6 +4,7 @@ use codex_extension_api::ToolPayload;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
 use codex_tools::JsonToolOutput;
 use serde_json::Value;
@@ -54,7 +55,9 @@ impl HistoryNotesToolOutput {
                     serde_json::from_value(image.get("detail").cloned().unwrap_or(Value::Null))
                         .map_err(|_| invalid_image())?;
                 content.push(FunctionCallOutputContentItem::InputImage {
-                    image_url: format!("data:{mime_type};base64,{data}"),
+                    image: ImageReference::Inline {
+                        image_url: format!("data:{mime_type};base64,{data}"),
+                    },
                     detail,
                 });
             }

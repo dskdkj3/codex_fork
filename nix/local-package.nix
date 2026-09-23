@@ -66,6 +66,11 @@ sourcePackage.overrideAttrs (old: {
     # cc-rs prefers these lowercase target keys over the cargo hook's HOST_CC/HOST_CXX.
     CC_x86_64_unknown_linux_gnu = "${llvmPackages.clang}/bin/clang";
     CXX_x86_64_unknown_linux_gnu = "${llvmPackages.clang}/bin/clang++";
+    # aws-lc-sys 0.45 probes HOST_CC before cc-rs reads the target-specific
+    # compiler. Keep its probe on Clang despite cargoBuildHook's GCC HOST_CC,
+    # or it passes GNU-only assembler flags to Clang's integrated assembler.
+    AWS_LC_SYS_HOST_CC = "${llvmPackages.clang}/bin/clang";
+    AWS_LC_SYS_HOST_CXX = "${llvmPackages.clang}/bin/clang++";
   };
   cargoBuildFlags = [
     "--bin"

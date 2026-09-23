@@ -12,8 +12,10 @@ use anyhow::Result;
 use codex_api::SharedAuthProvider;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::RouteAwareClientPool;
 use codex_http_client::RouteAwareRequestBuilder;
+use codex_http_client::RouteAwareRequestError;
 use codex_login::CodexAuth;
 use codex_login::default_client::get_codex_user_agent;
 use codex_protocol::account::PlanType as AccountPlanType;
@@ -33,9 +35,14 @@ use http::header::USER_AGENT;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
+use std::time::Duration;
 
+pub(crate) mod analytics;
 mod chatgpt_turn_cost;
+pub(crate) mod plan_history;
+pub(crate) mod profile;
 mod rate_limit_resets;
+pub(crate) mod task_usage;
 mod thread_usage;
 pub(crate) mod turn_usage;
 
@@ -316,6 +323,39 @@ impl Client {
         Ok((body, content_type))
     }
 
+    async fn exec_bootstrap_get(
+        &self,
+        url: &str,
+    ) -> std::result::Result<(String, String), RequestError> {
+        let request = self.request(Method::GET, url).headers(self.headers());
+        if !self.http.allows_system_proxy_fallback() {
+            return self.exec_request_detailed(request, "GET", url).await;
+        }
+
+        // Bound the complete GET, including its body, to leave time for proxy discovery and retry
+        // within the cloud loader's startup budget. GETs are safe to retry after a response timeout.
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.exec_request_detailed(request, "GET", url),
+        )
+        .await
+        {
+            Ok(Err(RequestError::Other(error)))
+                if error
+                    .downcast_ref::<RouteAwareRequestError>()
+                    .is_some_and(|error| error.is_connect() || error.is_timeout()) => {}
+            Err(_) => {}
+            Ok(response) => return response,
+        }
+
+        let http = self
+            .http
+            .clone()
+            .with_outbound_proxy_policy(OutboundProxyPolicy::RespectSystemProxy);
+        let request = http.get(url).headers(self.headers());
+        self.exec_request_detailed(request, "GET", url).await
+    }
+
     fn decode_json<T: DeserializeOwned>(&self, url: &str, ct: &str, body: &str) -> Result<T> {
         match serde_json::from_str::<T>(body) {
             Ok(v) => Ok(v),
@@ -338,14 +378,16 @@ impl Client {
         Ok(self.get_rate_limits_with_reset_credits().await?.rate_limits)
     }
 
-    pub async fn get_accounts_check(&self) -> Result<AccountsCheckResponse> {
+    pub async fn get_accounts_check(
+        &self,
+    ) -> std::result::Result<AccountsCheckResponse, RequestError> {
         let url = match self.path_style {
             PathStyle::CodexApi => format!("{}/api/codex/accounts/check", self.base_url),
             PathStyle::ChatGptApi => format!("{}/wham/accounts/check", self.base_url),
         };
-        let req = self.request(Method::GET, &url).headers(self.headers());
-        let (body, ct) = self.exec_request(req, "GET", &url).await?;
-        self.decode_json(&url, &ct, &body)
+        let (body, _) = self.exec_bootstrap_get(&url).await?;
+        serde_json::from_str(&body)
+            .map_err(|_| RequestError::Other(anyhow::anyhow!("Invalid accounts response.")))
     }
 
     pub async fn get_token_usage_profile(&self) -> Result<TokenUsageProfile> {
@@ -473,8 +515,7 @@ impl Client {
             PathStyle::CodexApi => format!("{}/api/codex/config/bundle", self.base_url),
             PathStyle::ChatGptApi => format!("{}/wham/config/bundle", self.base_url),
         };
-        let req = self.request(Method::GET, &url).headers(self.headers());
-        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        let (body, ct) = self.exec_bootstrap_get(&url).await?;
         self.decode_json::<ConfigBundleResponse>(&url, &ct, &body)
             .map_err(RequestError::from)
     }
@@ -565,19 +606,28 @@ impl Client {
             rate_limit_reached_type,
         )];
         if let Some(additional) = payload.additional_rate_limits.flatten() {
-            snapshots.extend(additional.into_iter().map(|details| {
-                Self::make_rate_limit_snapshot(
-                    Some(details.metered_feature),
-                    Some(details.limit_name),
-                    details.rate_limit.flatten().map(|rate_limit| *rate_limit),
-                    /*credits*/ None,
-                    /*spend_control*/ None,
-                    plan_type,
-                    /*rate_limit_reached_type*/ None,
-                )
-            }));
+            snapshots.extend(
+                additional
+                    .into_iter()
+                    .map(|details| Self::make_additional_rate_limit_snapshot(details, plan_type)),
+            );
         }
         snapshots
+    }
+
+    fn make_additional_rate_limit_snapshot(
+        details: codex_backend_openapi_models::models::AdditionalRateLimitDetails,
+        plan_type: Option<AccountPlanType>,
+    ) -> RateLimitSnapshot {
+        Self::make_rate_limit_snapshot(
+            Some(details.metered_feature),
+            Some(details.limit_name),
+            details.rate_limit.flatten().map(|rate_limit| *rate_limit),
+            /*credits*/ None,
+            /*spend_control*/ None,
+            plan_type,
+            /*rate_limit_reached_type*/ None,
+        )
     }
 
     fn make_rate_limit_snapshot(
@@ -603,6 +653,7 @@ impl Client {
         RateLimitSnapshot {
             limit_id,
             limit_name,
+            normal_model_slug: None,
             primary,
             secondary,
             credits: Self::map_credits(credits),
@@ -953,6 +1004,7 @@ mod tests {
             RateLimitSnapshot {
                 limit_id: Some("codex_other".to_string()),
                 limit_name: Some("codex_other".to_string()),
+                normal_model_slug: None,
                 primary: Some(RateLimitWindow {
                     used_percent: 90.0,
                     window_minutes: Some(60),
@@ -968,6 +1020,7 @@ mod tests {
             RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: Some("codex".to_string()),
+                normal_model_slug: None,
                 primary: Some(RateLimitWindow {
                     used_percent: 10.0,
                     window_minutes: Some(60),
