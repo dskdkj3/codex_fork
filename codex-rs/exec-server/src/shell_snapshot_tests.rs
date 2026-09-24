@@ -151,6 +151,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             );
         } else {
             assert_ne!(prepared.command, params.argv);
+            assert_eq!(&prepared.command[..3], &["/bin/bash", "--norc", "-pc"]);
         }
         assert_eq!(
             std::fs::read_to_string(home.path().join("captures"))?,

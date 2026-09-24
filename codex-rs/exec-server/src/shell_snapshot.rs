@@ -250,6 +250,13 @@ impl ShellSnapshotCache {
             "{startup}if ! eval \"unset {state_variables}\n{state_expansion}\" >/dev/null; then printf 'failed to restore shell snapshot\\n' >&2; fi\n{}",
             params.argv[2]
         );
+        if shell_type == ShellType::Bash {
+            // Restricted-network seccomp can make Bash mistake stdin for a
+            // remote connection. Replay already restores captured startup state.
+            prepared
+                .command
+                .insert(shell_start + 1, "--norc".to_string());
+        }
 
         Ok(())
     }
