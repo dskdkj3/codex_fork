@@ -373,6 +373,10 @@ import sys
 import time
 
 prompt = json.load(sys.stdin).get("prompt")
+# The gated fixture represents one delayed result. A later user turn must not
+# introduce a second async result while the test observes the first result.
+if {gated} and Path(r"{finished_path}").exists():
+    sys.exit(0)
 Path(r"{started_path}").write_text(prompt, encoding="utf-8")
 while {gated} and not Path(r"{release_path}").exists():
     time.sleep(0.01)
