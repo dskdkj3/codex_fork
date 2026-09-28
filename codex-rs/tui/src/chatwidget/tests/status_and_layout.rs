@@ -116,7 +116,7 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
     chat.refresh_status_line();
     assert_eq!(
         status_line_text(&chat),
-        Some("Context 30% left · Context 70% used · 0 in · 0 out".to_string())
+        Some("Context 2% left · Context 98% used · 0 in · 0 out".to_string())
     );
 }
 
@@ -2957,6 +2957,37 @@ async fn status_line_context_used_renders_labeled_percent() {
 }
 
 #[tokio::test]
+async fn status_line_context_percentages_count_full_active_context() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.local_settings.tui.status_line = Some(vec![
+        "context-used".to_string(),
+        "context-remaining".to_string(),
+    ]);
+
+    let mut rendered = Vec::new();
+    for (total_tokens, budget) in [
+        (12_000, 262_144),
+        (131_072, 262_144),
+        (262_144, 262_144),
+        (4_096, 8_192),
+    ] {
+        let mut info = make_token_info(total_tokens, /*context_window*/ 872_000);
+        info.model_auto_compact_token_limit = Some(budget);
+        handle_token_count(&mut chat, Some(info));
+        chat.refresh_status_line();
+        rendered.push(status_line_text(&chat).unwrap());
+    }
+
+    insta::assert_snapshot!(rendered.join("\n"), @"
+    Context 5% used · Context 95% left
+    Context 50% used · Context 50% left
+    Context 100% used · Context 0% left
+    Context 50% used · Context 50% left
+    ");
+}
+
+#[tokio::test]
 async fn status_line_context_used_tracks_compaction_budget_past_one_hundred_percent() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
@@ -2966,14 +2997,14 @@ async fn status_line_context_used_tracks_compaction_budget_past_one_hundred_perc
     before_compaction.model_auto_compact_token_limit = Some(131_072);
     handle_token_count(&mut chat, Some(before_compaction));
     chat.refresh_status_line();
-    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 110% used");
+    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 109% used");
     assert_eq!(chat.status_line_context_window_size(), Some(131_072));
 
     let mut after_compaction = make_token_info(30_000, 272_000);
     after_compaction.model_auto_compact_token_limit = Some(131_072);
     handle_token_count(&mut chat, Some(after_compaction));
     chat.refresh_status_line();
-    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 15% used");
+    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 23% used");
 }
 
 #[tokio::test]

@@ -52,13 +52,14 @@ impl TokenUsage {
             .round() as i64
     }
 
+    /// Count the full active context against the budget, including prompt and tool overhead.
+    /// Usage may exceed 100% while compaction is pending.
     pub(crate) fn percent_of_context_budget_used(&self, budget: i64) -> i64 {
-        if budget <= BASELINE_TOKENS {
+        if budget <= 0 {
             return 100;
         }
-        let used = (self.tokens_in_context_window() - BASELINE_TOKENS).max(0);
-        let available = budget - BASELINE_TOKENS;
-        ((used as f64 / available as f64) * 100.0).round() as i64
+        let used = self.tokens_in_context_window().max(0);
+        ((used as f64 / budget as f64) * 100.0).round() as i64
     }
 }
 
