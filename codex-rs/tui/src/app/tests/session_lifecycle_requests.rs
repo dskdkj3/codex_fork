@@ -155,6 +155,7 @@ pub(super) enum HistoryCapabilities {
     ItemsAndSummaryTurnsFail,
     ThreadListFails,
     ThreadStartFails,
+    RevertFails,
     ConfigReadUnsupported(i64),
     ConfigReadFails,
     ConfigReadUnknownVoice,
@@ -383,6 +384,17 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         JSONRPCMessage::Response(JSONRPCResponse {
                             id: request_id,
                             result: serde_json::json!({}),
+                        })
+                    } else if history_capabilities == HistoryCapabilities::RevertFails
+                        && request.method == "thread/revert"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                message: "forced history persistence failure".to_string(),
+                                data: None,
+                            },
                         })
                     } else if (matches!(
                         history_capabilities,

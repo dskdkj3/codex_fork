@@ -669,7 +669,8 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                     self.chat_widget.restore_user_message_to_composer(prompt);
-                    return Err(color_eyre::Report::new(err).wrap_err("prompt edit could not be confirmed; resume this session to reload its history"));
+                    let message = format!("prompt edit could not be confirmed; resume this session to reload its history: {err}");
+                    return Err(color_eyre::Report::new(err).wrap_err(message));
                     }
                 };
                 self.chat_widget.restore_user_message_to_composer(prompt.clone());
