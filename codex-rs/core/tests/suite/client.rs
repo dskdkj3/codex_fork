@@ -3350,6 +3350,7 @@ async fn token_count_includes_rate_limits_snapshot() {
         .with_auth(CodexAuth::from_api_key("test"))
         .with_config(move |config| {
             config.model_provider = provider;
+            config.model_auto_compact_token_limit = Some(131_072);
         });
     let codex = builder
         .build(&server)
@@ -3397,7 +3398,8 @@ async fn token_count_includes_rate_limits_snapshot() {
                     "total_tokens": 123
                 },
                 // Default model is gpt-5.4 in tests → 95% usable context window
-                "model_context_window": 258400
+                "model_context_window": 258400,
+                "model_auto_compact_token_limit": 131072
             },
             "rate_limits": {
                 "limit_id": "codex",

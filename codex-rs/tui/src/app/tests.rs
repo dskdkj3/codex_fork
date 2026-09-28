@@ -7089,6 +7089,7 @@ fn token_usage_notification(
                 reasoning_output_tokens: 0,
             },
             model_context_window,
+            model_auto_compact_token_limit: None,
         },
     })
 }

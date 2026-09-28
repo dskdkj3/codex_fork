@@ -169,6 +169,7 @@ fn token_info_for(model_slug: &str, config: &Config, usage: &TokenUsage) -> Toke
         total_token_usage: usage.clone(),
         last_token_usage: usage.clone(),
         model_context_window: context_window,
+        model_auto_compact_token_limit: None,
     }
 }
 
@@ -2209,6 +2210,7 @@ async fn status_context_window_uses_last_usage() {
         total_token_usage: total_usage.clone(),
         last_token_usage: last_usage,
         model_context_window: config.model_context_window,
+        model_auto_compact_token_limit: None,
     };
     let composite = new_status_output(
         &config,

@@ -2273,6 +2273,10 @@ pub struct TokenUsageInfo {
     // TODO(aibrahim): make this not optional
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
+    /// Effective automatic compaction threshold for the selected model.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub model_auto_compact_token_limit: Option<i64>,
 }
 
 impl TokenUsageInfo {
@@ -2291,6 +2295,7 @@ impl TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
                 model_context_window,
+                model_auto_compact_token_limit: None,
             },
         };
         if let Some(last) = last {
@@ -2327,6 +2332,7 @@ impl TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(context_window),
+            model_auto_compact_token_limit: None,
         };
         info.fill_to_context_window(context_window);
         info
@@ -6394,6 +6400,7 @@ mod tests {
             total_token_usage: TokenUsage::default(),
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
+            model_auto_compact_token_limit: None,
         });
         let last = Some(TokenUsage {
             input_tokens: 10,
@@ -6417,6 +6424,7 @@ mod tests {
             total_token_usage: TokenUsage::default(),
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
+            model_auto_compact_token_limit: None,
         });
         let last = Some(TokenUsage {
             input_tokens: 10,

@@ -405,7 +405,10 @@ impl ChatWidget {
     pub(super) fn status_line_context_window_size(&self) -> Option<i64> {
         self.token_info
             .as_ref()
-            .and_then(|info| info.model_context_window)
+            .and_then(|info| {
+                info.model_auto_compact_token_limit
+                    .or(info.model_context_window)
+            })
             .or(self.config.model_context_window)
     }
 
@@ -422,16 +425,12 @@ impl ChatWidget {
             .as_ref()
             .map(|info| &info.last_token_usage)
             .unwrap_or(&default_usage);
-        Some(
-            usage
-                .percent_of_context_window_remaining(context_window)
-                .clamp(0, 100),
-        )
+        Some(100 - usage.percent_of_context_budget_used(context_window))
     }
 
     pub(super) fn status_line_context_used_percent(&self) -> Option<i64> {
         self.status_line_context_remaining_percent()
-            .map(|remaining| (100 - remaining).clamp(0, 100))
+            .map(|remaining| 100 - remaining)
     }
 
     pub(super) fn status_line_total_usage(&self) -> TokenUsage {

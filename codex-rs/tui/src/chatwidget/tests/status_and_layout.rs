@@ -178,6 +178,7 @@ async fn context_indicator_shows_used_tokens_when_window_unknown() {
         total_token_usage: token_usage.clone(),
         last_token_usage: token_usage,
         model_context_window: None,
+        model_auto_compact_token_limit: None,
     };
 
     handle_token_count(&mut chat, Some(token_info));
@@ -2953,6 +2954,26 @@ async fn status_line_context_used_renders_labeled_percent() {
         drain_insert_history(&mut rx).is_empty(),
         "context-used should remain a valid status line item"
     );
+}
+
+#[tokio::test]
+async fn status_line_context_used_tracks_compaction_budget_past_one_hundred_percent() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.local_settings.tui.status_line = Some(vec!["context-used".to_string()]);
+
+    let mut before_compaction = make_token_info(143_000, 272_000);
+    before_compaction.model_auto_compact_token_limit = Some(131_072);
+    handle_token_count(&mut chat, Some(before_compaction));
+    chat.refresh_status_line();
+    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 110% used");
+    assert_eq!(chat.status_line_context_window_size(), Some(131_072));
+
+    let mut after_compaction = make_token_info(30_000, 272_000);
+    after_compaction.model_auto_compact_token_limit = Some(131_072);
+    handle_token_count(&mut chat, Some(after_compaction));
+    chat.refresh_status_line();
+    insta::assert_snapshot!(status_line_text(&chat).unwrap(), @"Context 15% used");
 }
 
 #[tokio::test]

@@ -3849,7 +3849,9 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
 async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    mock_responses_config(&server.uri())
+        .with_root_config("model_auto_compact_token_limit = 131072")
+        .write(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_token_usage(
         codex_home.path(),
@@ -3892,6 +3894,10 @@ async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<(
     assert_eq!(notification.token_usage.total.reasoning_output_tokens, 10);
     assert_eq!(notification.token_usage.last.total_tokens, 90);
     assert_eq!(notification.token_usage.model_context_window, Some(200_000));
+    assert_eq!(
+        notification.token_usage.model_auto_compact_token_limit,
+        Some(131_072)
+    );
 
     Ok(())
 }
@@ -3940,6 +3946,7 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
                     ..Default::default()
                 },
                 model_context_window: Some(200_000),
+                model_auto_compact_token_limit: None,
             }),
             rate_limits: None,
         })),
@@ -4017,6 +4024,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
                     ..Default::default()
                 },
                 model_context_window: Some(200_000),
+                model_auto_compact_token_limit: None,
             }),
             rate_limits: None,
         })),
@@ -4303,6 +4311,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
                         codex_rollout_budget_units: None,
                     },
                     model_context_window: Some(200_000),
+                    model_auto_compact_token_limit: None,
                 }),
                 rate_limits: None,
             }))?,
