@@ -956,6 +956,8 @@ async fn exec(
         ))
     })?;
     let arg0_ref = arg0.as_deref();
+    #[cfg(target_os = "linux")]
+    let resource_guard = codex_utils_pty::resource_guard::ResourceGuard::prepare(args).await?;
     let child = spawn_child_async(SpawnChildRequest {
         program: PathBuf::from(program),
         args: args.into(),
@@ -968,12 +970,34 @@ async fn exec(
         network: None,
         stdio_policy: StdioPolicy::RedirectForShellTool,
         env,
+        #[cfg(target_os = "linux")]
+        resource_attachment: resource_guard
+            .as_ref()
+            .map(codex_utils_pty::resource_guard::ResourceGuard::attachment),
     })
     .await?;
     if let Some(after_spawn) = after_spawn {
         after_spawn();
     }
-    consume_output(child, expiration, capture_policy, stdout_stream).await
+    let output = consume_output(child, expiration, capture_policy, stdout_stream).await?;
+    #[cfg(target_os = "linux")]
+    let output = if let Some(guard) = resource_guard {
+        let mut output = output;
+        let outcome = guard.finish(output.exit_status.code().unwrap_or(137)).await;
+        if let Some(message) = outcome.diagnostic {
+            output.exit_status = synthetic_exit_status_for_code(outcome.exit_code);
+            output.timed_out = false;
+            output.stderr.text.extend_from_slice(message.as_bytes());
+            output
+                .aggregated_output
+                .text
+                .extend_from_slice(message.as_bytes());
+        }
+        output
+    } else {
+        output
+    };
+    Ok(output)
 }
 
 /// Consumes the output of a child process according to the configured capture
@@ -1274,3 +1298,7 @@ fn synthetic_exit_status_for_code(code: i32) -> ExitStatus {
 #[cfg(test)]
 #[path = "exec_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "exec_resource_guard_tests.rs"]
+mod resource_guard_tests;

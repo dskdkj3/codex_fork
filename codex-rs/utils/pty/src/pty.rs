@@ -141,6 +141,12 @@ pub async fn spawn_process(
     #[cfg(not(unix))]
     let _ = inherited_fds;
 
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(crate::resource_guard::SOCKET_ENV).is_some() {
+        return spawn_process_preserving_fds(program, args, cwd, env, arg0, size, inherited_fds)
+            .await;
+    }
+
     #[cfg(unix)]
     if !inherited_fds.is_empty() {
         return spawn_process_preserving_fds(program, args, cwd, env, arg0, size, inherited_fds)
@@ -300,6 +306,12 @@ async fn spawn_process_preserving_fds(
     let (master, slave) = open_unix_pty(size)?;
     let io = crate::unix_io::PtyIo::new(master.as_raw_fd())?;
     let mut command = StdCommand::new(program);
+    #[cfg(target_os = "linux")]
+    let resource_guard = crate::resource_guard::ResourceGuard::prepare(args).await?;
+    #[cfg(target_os = "linux")]
+    let attachment = resource_guard
+        .as_ref()
+        .map(crate::resource_guard::ResourceGuard::attachment);
     if let Some(arg0) = arg0 {
         command.arg0(arg0);
     }
@@ -311,6 +323,8 @@ async fn spawn_process_preserving_fds(
     for (key, value) in env {
         command.env(key, value);
     }
+    #[cfg(target_os = "linux")]
+    command.env_remove(crate::resource_guard::SOCKET_ENV);
 
     // The child should see one terminal on all three stdio streams. Cloning
     // the slave fd gives us three owned handles to the same PTY slave device
@@ -326,6 +340,10 @@ async fn spawn_process_preserving_fds(
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .pre_exec(move || {
+                #[cfg(target_os = "linux")]
+                if let Some(attachment) = attachment {
+                    attachment.attach()?;
+                }
                 for signo in &[
                     libc::SIGCHLD,
                     libc::SIGHUP,
@@ -363,6 +381,8 @@ async fn spawn_process_preserving_fds(
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
+    #[cfg(target_os = "linux")]
+    let diagnostic_tx = stdout_tx.clone();
     let (_stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(1);
     let (reader_handle, writer_handle) = io.spawn(
         stdout_tx,
@@ -379,6 +399,16 @@ async fn spawn_process_preserving_fds(
         let code = match child.wait() {
             Ok(status) => exit_code_from_status(status),
             Err(_) => -1,
+        };
+        #[cfg(target_os = "linux")]
+        let code = if let Some(guard) = resource_guard {
+            let outcome = guard.finish_blocking(code);
+            if let Some(message) = outcome.diagnostic {
+                let _ = diagnostic_tx.blocking_send(message.into_bytes());
+            }
+            outcome.exit_code
+        } else {
+            code
         };
         wait_exit_status.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut guard) = wait_exit_code.lock() {

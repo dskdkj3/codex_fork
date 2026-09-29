@@ -47,6 +47,8 @@ pub(crate) struct SpawnChildRequest<'a> {
     pub network: Option<&'a NetworkProxy>,
     pub stdio_policy: StdioPolicy,
     pub env: HashMap<String, String>,
+    #[cfg(target_os = "linux")]
+    pub resource_attachment: Option<codex_utils_pty::resource_guard::ChildAttachment>,
 }
 
 pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io::Result<Child> {
@@ -59,9 +61,13 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         network,
         stdio_policy,
         mut env,
+        #[cfg(target_os = "linux")]
+        resource_attachment,
     } = request;
 
     env.retain(|name, _| !is_non_inheritable_env_var(name));
+    #[cfg(target_os = "linux")]
+    env.remove(codex_utils_pty::resource_guard::SOCKET_ENV);
 
     trace!(
         "spawn_child_async: {program:?} {args:?} {arg0:?} {cwd:?} {network_sandbox_policy:?} {stdio_policy:?} {env:?}"
@@ -97,6 +103,10 @@ pub(crate) async fn spawn_child_async(request: SpawnChildRequest<'_>) -> std::io
         #[cfg(target_os = "linux")]
         let parent_pid = libc::getpid();
         cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(attachment) = resource_attachment {
+                attachment.attach()?;
+            }
             if detach_from_tty {
                 codex_utils_pty::process_group::detach_from_tty()?;
             }

@@ -143,6 +143,12 @@ async fn spawn_process_with_stdin_mode(
     let _ = inherited_fds;
 
     let mut command = Command::new(program);
+    #[cfg(target_os = "linux")]
+    let resource_guard = crate::resource_guard::ResourceGuard::prepare(args).await?;
+    #[cfg(target_os = "linux")]
+    let attachment = resource_guard
+        .as_ref()
+        .map(crate::resource_guard::ResourceGuard::attachment);
     #[cfg(unix)]
     if let Some(arg0) = arg0 {
         command.arg0(arg0);
@@ -154,6 +160,10 @@ async fn spawn_process_with_stdin_mode(
     #[cfg(unix)]
     unsafe {
         command.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(attachment) = attachment {
+                attachment.attach()?;
+            }
             crate::process_group::detach_from_tty()?;
             #[cfg(target_os = "linux")]
             crate::process_group::set_parent_death_signal(parent_pid)?;
@@ -168,6 +178,8 @@ async fn spawn_process_with_stdin_mode(
     for (key, value) in env {
         command.env(key, value);
     }
+    #[cfg(target_os = "linux")]
+    command.env_remove(crate::resource_guard::SOCKET_ENV);
     for arg in args {
         command.arg(arg);
     }
@@ -286,6 +298,16 @@ async fn spawn_process_with_stdin_mode(
                 exit_code_from_status(status)
             }
             Err(_) => -1,
+        };
+        #[cfg(target_os = "linux")]
+        let code = if let Some(guard) = resource_guard {
+            let outcome = guard.finish(code).await;
+            if let Some(message) = outcome.diagnostic {
+                let _ = stderr_tx.send(message.into_bytes()).await;
+            }
+            outcome.exit_code
+        } else {
+            code
         };
         wait_exit_status.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut guard) = wait_exit_code.lock() {

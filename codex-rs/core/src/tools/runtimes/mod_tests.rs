@@ -347,6 +347,34 @@ fn maybe_wrap_shell_lc_with_snapshot_bootstraps_in_user_shell() {
     assert!(rewritten[2].contains("exec '/bin/bash' -c 'echo hello'"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_wrapper_preserves_explicit_resource_profile() {
+    let dir = tempdir().expect("create temp dir");
+    let snapshot_path = dir.path().join("snapshot.sh");
+    std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
+    let (session_shell, shell_snapshot) =
+        shell_with_snapshot(ShellType::Zsh, "/bin/zsh", snapshot_path.abs());
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "# agent-resource-profile: build\nprintf compiled".to_string(),
+    ];
+    let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        &command,
+        &session_shell,
+        Some(&shell_snapshot),
+        &HashMap::new(),
+        &HashMap::new(),
+        &RuntimePathPrepends::default(),
+    );
+    assert_eq!(
+        rewritten[2].lines().next(),
+        Some(codex_utils_pty::resource_guard::BUILD_DIRECTIVE)
+    );
+    assert!(rewritten[2].contains("printf compiled"));
+}
+
 #[test]
 fn maybe_wrap_shell_lc_with_snapshot_escapes_single_quotes() {
     let dir = tempdir().expect("create temp dir");

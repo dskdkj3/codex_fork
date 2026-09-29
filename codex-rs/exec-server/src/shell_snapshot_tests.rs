@@ -37,6 +37,13 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
     recovery_attempt: usize,
     initial_purpose: CapturePurpose,
 ) -> anyhow::Result<()> {
+    let bash = codex_shell_command::shell_detect::get_shell(
+        codex_shell_command::shell_detect::ShellType::Bash,
+    )
+    .expect("Bash is required for shell snapshot tests")
+    .shell_path
+    .to_string_lossy()
+    .into_owned();
     let prewarm_fails_first = initial_purpose == CapturePurpose::Prewarm;
     let home = tempfile::TempDir::new()?;
     let profile = home.path().join(".bashrc");
@@ -44,11 +51,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
     let params = ExecParams {
         metadata: Default::default(),
         process_id: ProcessId::from("snapshot-retry"),
-        argv: vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "true".to_string(),
-        ],
+        argv: vec![bash.clone(), "-lc".to_string(), "true".to_string()],
         cwd: codex_utils_path_uri::PathUri::from_host_native_path(home.path())?,
         env: HashMap::from([
             (
@@ -62,7 +65,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             scope_id: "attachment-1".to_string(),
             shell: ShellInfo {
                 name: "bash".to_string(),
-                path: "/bin/bash".to_string(),
+                path: bash.clone(),
             },
         }),
         tty: false,
@@ -151,7 +154,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             );
         } else {
             assert_ne!(prepared.command, params.argv);
-            assert_eq!(&prepared.command[..3], &["/bin/bash", "--norc", "-pc"]);
+            assert_eq!(&prepared.command[..3], &[bash.as_str(), "--norc", "-pc"]);
         }
         assert_eq!(
             std::fs::read_to_string(home.path().join("captures"))?,

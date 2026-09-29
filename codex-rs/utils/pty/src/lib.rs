@@ -10,6 +10,11 @@ pub mod pipe;
 mod process;
 pub mod process_group;
 pub mod pty;
+#[cfg(target_os = "linux")]
+pub mod resource_guard;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "resource_guard_tests.rs"]
+mod resource_guard_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(unix)]
