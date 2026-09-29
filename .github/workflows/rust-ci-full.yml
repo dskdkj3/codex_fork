@@ -9,6 +9,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  tui_terminal:
+    uses: ./.github/workflows/tui-terminal.yml
+
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
@@ -532,6 +535,7 @@ jobs:
       [
         general,
         cargo_shear,
+        tui_terminal,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
         lint_build,
@@ -551,6 +555,7 @@ jobs:
           echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
           echo "general: ${{ needs.general.result }}"
           echo "shear  : ${{ needs.cargo_shear.result }}"
+          echo "terminal: ${{ needs.tui_terminal.result }}"
           echo "lint   : ${{ needs.lint_build.result }}"
           echo "test macos : ${{ needs.tests_macos_aarch64.result }}"
           echo "test linux : ${{ needs.tests_linux_x64_remote.result }}"
@@ -560,6 +565,7 @@ jobs:
           [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
           [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
           [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
+          [[ '${{ needs.tui_terminal.result }}' == 'success' ]] || { echo 'tui_terminal failed'; exit 1; }
           [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
           [[ '${{ needs.tests_macos_aarch64.result }}' == 'success' ]] || { echo 'tests_macos_aarch64 failed'; exit 1; }

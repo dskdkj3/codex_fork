@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 use std::thread::sleep;
@@ -10,24 +9,20 @@ use anyhow::Context;
 use anyhow::Result;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use tempfile::TempDir;
 use tempfile::tempdir;
 use wiremock::MockServer;
 use wiremock::matchers::body_string_contains;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"]
+#[ignore = "terminal delivery gate: build codex-cli, then run these tests with --run-ignored only"]
 async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -> Result<()> {
-    if cfg!(windows) {
-        return Ok(());
-    }
+    anyhow::ensure!(!cfg!(windows), "tmux terminal acceptance requires Unix");
     skip_if_no_network!(Ok(()));
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("skipping resize smoke because tmux is unavailable");
-        return Ok(());
-    }
 
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    let codex = codex_binary(&repo_root)?;
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")
+        .context("build the current CLI with `cargo build --locked -p codex-cli --bin codex` before terminal acceptance")?;
     let codex_home = tempdir()?;
     let server = MockServer::start().await;
     let _response_mock = mount_resize_response(&server).await;
@@ -35,13 +30,12 @@ async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -
     write_auth(codex_home.path())?;
 
     let session_name = format!("codex-resize-reflow-smoke-{}", std::process::id());
-    let _session = TmuxSession {
-        name: session_name.clone(),
-    };
+    let session = TmuxSession::new()?;
 
     let prompt = "Say hi.";
     let start_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("new-session")
             .arg("-d")
             .arg("-P")
@@ -69,32 +63,34 @@ async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -
     anyhow::ensure!(!codex_pane.is_empty(), "tmux did not report a pane id");
 
     wait_for_capture_contains(
+        &session,
         &codex_pane,
         "resize reflow sentinel",
         Duration::from_secs(/*secs*/ 15),
     )?;
-    wait_for_capture_contains(
-        &codex_pane,
-        "gpt-5.4 default",
-        Duration::from_secs(/*secs*/ 15),
-    )?;
     let draft = "Notice where we are here in terms of y location.";
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("send-keys")
             .arg("-t")
             .arg(&codex_pane)
             .arg("-l")
             .arg(draft),
     )?;
-    let baseline_capture =
-        wait_for_capture_contains(&codex_pane, draft, Duration::from_secs(/*secs*/ 15))?;
+    let baseline_capture = wait_for_capture_contains(
+        &session,
+        &codex_pane,
+        draft,
+        Duration::from_secs(/*secs*/ 15),
+    )?;
     let baseline_row = last_composer_row(&baseline_capture).context("composer row before split")?;
     let baseline_history_row = first_row_containing(&baseline_capture, "resize reflow sentinel")
         .context("history row before split")?;
 
     let split_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("split-window")
             .arg("-d")
             .arg("-P")
@@ -110,12 +106,11 @@ async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -
     )?;
     let split_pane = stdout_text(&split_output).trim().to_string();
 
-    sleep(Duration::from_millis(/*millis*/ 250));
-    let first_capture = capture_pane(&codex_pane)?;
+    let first_capture = wait_for_stable_capture(&session, &codex_pane)?;
     let first_row = last_composer_row(&first_capture).context("composer row after split")?;
 
     sleep(Duration::from_millis(/*millis*/ 1_000));
-    let second_capture = capture_pane(&codex_pane)?;
+    let second_capture = capture_pane(&session, &codex_pane)?;
     let second_row =
         last_composer_row(&second_capture).context("composer row after reflow wait")?;
 
@@ -133,14 +128,14 @@ async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -
     );
 
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("kill-pane")
             .arg("-t")
             .arg(&split_pane),
     )?;
 
-    sleep(Duration::from_millis(/*millis*/ 500));
-    let final_capture = capture_pane(&codex_pane)?;
+    let final_capture = wait_for_stable_capture(&session, &codex_pane)?;
     let final_row =
         last_composer_row(&final_capture).context("composer row after closing split")?;
     anyhow::ensure!(
@@ -162,16 +157,10 @@ async fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"]
+#[ignore = "terminal delivery gate: build codex-cli, then run these tests with --run-ignored only"]
 async fn tmux_repeated_resizes_do_not_push_composer_down() -> Result<()> {
-    if cfg!(windows) {
-        return Ok(());
-    }
+    anyhow::ensure!(!cfg!(windows), "tmux terminal acceptance requires Unix");
     skip_if_no_network!(Ok(()));
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("skipping resize smoke because tmux is unavailable");
-        return Ok(());
-    }
 
     run_repeated_resize_smoke().await?;
 
@@ -179,19 +168,14 @@ async fn tmux_repeated_resizes_do_not_push_composer_down() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"]
+#[ignore = "terminal delivery gate: build codex-cli, then run these tests with --run-ignored only"]
 async fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()> {
-    if cfg!(windows) {
-        return Ok(());
-    }
+    anyhow::ensure!(!cfg!(windows), "tmux terminal acceptance requires Unix");
     skip_if_no_network!(Ok(()));
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("skipping resize smoke because tmux is unavailable");
-        return Ok(());
-    }
 
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    let codex = codex_binary(&repo_root)?;
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")
+        .context("build the current CLI with `cargo build --locked -p codex-cli --bin codex` before terminal acceptance")?;
     let codex_home = tempdir()?;
     let server = MockServer::start().await;
     let _response_mock = mount_resize_response(&server).await;
@@ -199,13 +183,12 @@ async fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()
     write_auth(codex_home.path())?;
 
     let session_name = format!("codex-resize-width-{}", std::process::id());
-    let _session = TmuxSession {
-        name: session_name.clone(),
-    };
+    let session = TmuxSession::new()?;
 
     let prompt = "Send me a large paragraph of text for testing.";
     let start_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("new-session")
             .arg("-d")
             .arg("-P")
@@ -233,32 +216,34 @@ async fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()
     anyhow::ensure!(!codex_pane.is_empty(), "tmux did not report a pane id");
 
     wait_for_capture_contains(
+        &session,
         &codex_pane,
         "resize reflow sentinel",
         Duration::from_secs(/*secs*/ 15),
     )?;
-    wait_for_capture_contains(
-        &codex_pane,
-        "gpt-5.4 default",
-        Duration::from_secs(/*secs*/ 15),
-    )?;
     let draft = "Notice where we are here in terms of y location.";
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("send-keys")
             .arg("-t")
             .arg(&codex_pane)
             .arg("-l")
             .arg(draft),
     )?;
-    let baseline_capture =
-        wait_for_capture_contains(&codex_pane, draft, Duration::from_secs(/*secs*/ 15))?;
+    let baseline_capture = wait_for_capture_contains(
+        &session,
+        &codex_pane,
+        draft,
+        Duration::from_secs(/*secs*/ 15),
+    )?;
     let baseline_row = last_composer_row(&baseline_capture).context("composer row before split")?;
     let baseline_history_row = first_row_containing(&baseline_capture, "resize reflow sentinel")
         .context("history row before split")?;
 
     let split_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("split-window")
             .arg("-d")
             .arg("-P")
@@ -274,16 +259,16 @@ async fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()
     )?;
     let split_pane = stdout_text(&split_output).trim().to_string();
 
-    sleep(Duration::from_millis(/*millis*/ 750));
+    wait_for_stable_capture(&session, &codex_pane)?;
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("kill-pane")
             .arg("-t")
             .arg(&split_pane),
     )?;
 
-    sleep(Duration::from_millis(/*millis*/ 1_000));
-    let restored_capture = capture_pane(&codex_pane)?;
+    let restored_capture = wait_for_stable_capture(&session, &codex_pane)?;
     let restored_row =
         last_composer_row(&restored_capture).context("composer row after width restore")?;
     let restored_history_row = first_row_containing(&restored_capture, "resize reflow sentinel")
@@ -307,31 +292,25 @@ async fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires tmux and a locally built codex binary; run with --ignored for manual resize smoke"]
+#[ignore = "terminal delivery gate: build codex-cli, then run these tests with --run-ignored only"]
 async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<()> {
-    if cfg!(windows) {
-        return Ok(());
-    }
+    anyhow::ensure!(!cfg!(windows), "tmux terminal acceptance requires Unix");
     skip_if_no_network!(Ok(()));
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("skipping resize smoke because tmux is unavailable");
-        return Ok(());
-    }
 
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    let codex = codex_binary(&repo_root)?;
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")
+        .context("build the current CLI with `cargo build --locked -p codex-cli --bin codex` before terminal acceptance")?;
     let codex_home = tempdir()?;
     let server = MockServer::start().await;
     write_config(codex_home.path(), &repo_root, &server.uri())?;
     write_auth(codex_home.path())?;
 
     let session_name = format!("codex-resize-scrolled-composer-{}", std::process::id());
-    let _session = TmuxSession {
-        name: session_name.clone(),
-    };
+    let session = TmuxSession::new()?;
 
     let start_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("new-session")
             .arg("-d")
             .arg("-P")
@@ -348,8 +327,6 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
             .arg(format!("CODEX_HOME={}", codex_home.path().display()))
             .arg("OPENAI_API_KEY=dummy")
             .arg(codex)
-            .arg("--model")
-            .arg("gpt-5.6-terra")
             .arg("-c")
             .arg("analytics.enabled=false")
             .arg("--no-alt-screen")
@@ -358,16 +335,13 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
     )?;
     let codex_pane = stdout_text(&start_output).trim().to_string();
     anyhow::ensure!(!codex_pane.is_empty(), "tmux did not report a pane id");
-    wait_for_capture_contains(
-        &codex_pane,
-        "gpt-5.6-terra",
-        Duration::from_secs(/*secs*/ 15),
-    )?;
+    wait_for_capture_contains(&session, &codex_pane, "›", Duration::from_secs(/*secs*/ 15))?;
 
     for index in 1..=9 {
         let line = format!("probe-{index:02} clean words");
         check(
-            Command::new("tmux")
+            session
+                .command()
                 .arg("send-keys")
                 .arg("-t")
                 .arg(&codex_pane)
@@ -375,7 +349,8 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
                 .arg(line),
         )?;
         check(
-            Command::new("tmux")
+            session
+                .command()
                 .arg("send-keys")
                 .arg("-t")
                 .arg(&codex_pane)
@@ -385,21 +360,27 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
 
     let final_line = "q".repeat(/*n*/ 41);
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("send-keys")
             .arg("-t")
             .arg(&codex_pane)
             .arg("-l")
             .arg(&final_line),
     )?;
-    let baseline =
-        wait_for_capture_contains(&codex_pane, &final_line, Duration::from_secs(/*secs*/ 15))?;
+    let baseline = wait_for_capture_contains(
+        &session,
+        &codex_pane,
+        &final_line,
+        Duration::from_secs(/*secs*/ 15),
+    )?;
 
     for (phase, width, height, minimum_visible_rows) in
         [("narrowed", "28", "9", 2), ("restored", "44", "14", 6)]
     {
         check(
-            Command::new("tmux")
+            session
+                .command()
                 .arg("resize-window")
                 .arg("-t")
                 .arg(&session_name)
@@ -408,8 +389,7 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
                 .arg("-y")
                 .arg(height),
         )?;
-        sleep(Duration::from_millis(/*millis*/ 350));
-        let capture = capture_pane(&codex_pane)?;
+        let capture = wait_for_stable_capture(&session, &codex_pane)?;
         let visible_rows = capture
             .lines()
             .filter_map(|line| line.find("probe-").map(|start| (line, start)))
@@ -442,7 +422,8 @@ async fn tmux_scrolled_composer_resize_preserves_visible_draft_text() -> Result<
 
 async fn run_repeated_resize_smoke() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    let codex = codex_binary(&repo_root)?;
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")
+        .context("build the current CLI with `cargo build --locked -p codex-cli --bin codex` before terminal acceptance")?;
     let codex_home = tempdir()?;
     let server = MockServer::start().await;
     let _response_mock = mount_resize_response(&server).await;
@@ -450,13 +431,12 @@ async fn run_repeated_resize_smoke() -> Result<()> {
     write_auth(codex_home.path())?;
 
     let session_name = format!("codex-resize-repeat-{}", std::process::id());
-    let _session = TmuxSession {
-        name: session_name.clone(),
-    };
+    let session = TmuxSession::new()?;
 
     let prompt = "Send me a large paragraph of text for testing.";
     let start_output = checked_output(
-        Command::new("tmux")
+        session
+            .command()
             .arg("new-session")
             .arg("-d")
             .arg("-P")
@@ -484,33 +464,35 @@ async fn run_repeated_resize_smoke() -> Result<()> {
     anyhow::ensure!(!codex_pane.is_empty(), "tmux did not report a pane id");
 
     wait_for_capture_contains(
+        &session,
         &codex_pane,
         "resize reflow sentinel",
         Duration::from_secs(/*secs*/ 15),
     )?;
-    wait_for_capture_contains(
-        &codex_pane,
-        "gpt-5.4 default",
-        Duration::from_secs(/*secs*/ 15),
-    )?;
     let draft = "Notice where we are here in terms of y location.";
     check(
-        Command::new("tmux")
+        session
+            .command()
             .arg("send-keys")
             .arg("-t")
             .arg(&codex_pane)
             .arg("-l")
             .arg(draft),
     )?;
-    let baseline_capture =
-        wait_for_capture_contains(&codex_pane, draft, Duration::from_secs(/*secs*/ 15))?;
+    let baseline_capture = wait_for_capture_contains(
+        &session,
+        &codex_pane,
+        draft,
+        Duration::from_secs(/*secs*/ 15),
+    )?;
     let baseline_row = last_composer_row(&baseline_capture).context("composer row before split")?;
     let baseline_history_row = first_row_containing(&baseline_capture, "resize reflow sentinel")
         .context("history row before split")?;
 
     for cycle in 1..=3 {
         let split_output = checked_output(
-            Command::new("tmux")
+            session
+                .command()
                 .arg("split-window")
                 .arg("-d")
                 .arg("-P")
@@ -526,16 +508,16 @@ async fn run_repeated_resize_smoke() -> Result<()> {
         )?;
         let split_pane = stdout_text(&split_output).trim().to_string();
 
-        sleep(Duration::from_millis(/*millis*/ 250));
+        wait_for_stable_capture(&session, &codex_pane)?;
         check(
-            Command::new("tmux")
+            session
+                .command()
                 .arg("kill-pane")
                 .arg("-t")
                 .arg(&split_pane),
         )?;
 
-        sleep(Duration::from_millis(/*millis*/ 500));
-        let restored_capture = capture_pane(&codex_pane)?;
+        let restored_capture = wait_for_stable_capture(&session, &codex_pane)?;
         let restored_row = last_composer_row(&restored_capture)
             .with_context(|| format!("composer row after resize cycle {cycle}"))?;
         let restored_history_row =
@@ -560,31 +542,39 @@ async fn run_repeated_resize_smoke() -> Result<()> {
     Ok(())
 }
 
+// Each test owns a separate server, so user config, panes and concurrent tests
+// cannot change its geometry. Drop only ever stops this test's private server.
 struct TmuxSession {
-    name: String,
+    socket_dir: TempDir,
+}
+
+impl TmuxSession {
+    fn new() -> Result<Self> {
+        checked_output(Command::new("tmux").arg("-V"))
+            .context("tmux is required for terminal acceptance; install it and add it to PATH")?;
+        Ok(Self {
+            socket_dir: tempdir()?,
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new("tmux");
+        command
+            .arg("-S")
+            .arg(self.socket_dir.path().join("tmux.sock"))
+            .arg("-f")
+            .arg("/dev/null")
+            .arg("-u")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        command
+    }
 }
 
 impl Drop for TmuxSession {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("kill-session")
-            .arg("-t")
-            .arg(&self.name)
-            .output();
+        let _ = self.command().arg("kill-server").output();
     }
-}
-
-fn codex_binary(repo_root: &Path) -> Result<PathBuf> {
-    if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex") {
-        return Ok(path);
-    }
-
-    let fallback = repo_root.join("codex-rs/target/debug/codex");
-    anyhow::ensure!(
-        fallback.is_file(),
-        "codex binary is unavailable; run `cargo build -p codex-cli` first"
-    );
-    Ok(fallback)
 }
 
 fn write_config(codex_home: &Path, repo_root: &Path, server_url: &str) -> Result<()> {
@@ -652,11 +642,16 @@ fn resize_reflow_sse() -> String {
     ])
 }
 
-fn wait_for_capture_contains(pane: &str, needle: &str, timeout: Duration) -> Result<String> {
+fn wait_for_capture_contains(
+    session: &TmuxSession,
+    pane: &str,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String> {
     let deadline = Instant::now() + timeout;
     let mut last_capture = String::new();
     while Instant::now() < deadline {
-        last_capture = capture_pane(pane)?;
+        last_capture = capture_pane(session, pane)?;
         if last_capture.contains(needle) {
             return Ok(last_capture);
         }
@@ -666,9 +661,32 @@ fn wait_for_capture_contains(pane: &str, needle: &str, timeout: Duration) -> Res
     anyhow::bail!("timed out waiting for {needle:?}; last capture:\n{last_capture}");
 }
 
-fn capture_pane(pane: &str) -> Result<String> {
-    let output = output(
-        Command::new("tmux")
+// Wait for redraws to settle rather than sampling after a machine-dependent
+// fixed sleep. A bounded quiet window also catches delayed reflow frames.
+fn wait_for_stable_capture(session: &TmuxSession, pane: &str) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(/*secs*/ 10);
+    let mut capture = capture_pane(session, pane)?;
+    let mut stable_since = Instant::now();
+    loop {
+        sleep(Duration::from_millis(/*millis*/ 100));
+        let next = capture_pane(session, pane)?;
+        if next != capture {
+            capture = next;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= Duration::from_millis(/*millis*/ 750) {
+            return Ok(capture);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "terminal did not settle:\n{capture}"
+        );
+    }
+}
+
+fn capture_pane(session: &TmuxSession, pane: &str) -> Result<String> {
+    let output = checked_output(
+        session
+            .command()
             .arg("capture-pane")
             .arg("-p")
             .arg("-t")

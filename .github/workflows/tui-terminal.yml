@@ -1,0 +1,47 @@
+name: TUI terminal regression
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  resize:
+    name: tmux resize regression (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - name: Install build and terminal dependencies
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev libssl-dev tmux
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+      # A TUI-only nextest run does not build the CLI used inside tmux.
+      # Always rebuild it from this checkout before running the ignored tests.
+      - name: Build current CLI
+        run: cargo build --locked -p codex-cli --bin codex
+      - name: Run all four terminal resize regressions
+        run: just test --locked -p codex-tui --test all --run-ignored only -E 'test(/^suite::resize_reflow::tmux_/)' --retries 0
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tui-terminal-results
+          path: ${{ env.CARGO_TARGET_DIR }}/nextest/local/junit.xml
+          if-no-files-found: warn
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
