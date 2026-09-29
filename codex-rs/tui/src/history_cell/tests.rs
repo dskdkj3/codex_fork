@@ -1869,6 +1869,29 @@ fn session_header_hides_fast_status_when_disabled() {
 }
 
 #[test]
+fn session_header_preserves_explicit_versions_in_narrow_layout() {
+    let mut frames = Vec::new();
+    for version in ["0.0.0", "10.200.300", "0.156.1-alpha.12"] {
+        let cell = SessionHeaderHistoryCell::new(
+            "gpt-5.6-sol".to_string(),
+            Some(ReasoningEffortConfig::XHigh),
+            /*show_fast_status*/ true,
+            PathBuf::from("project"),
+            version,
+        );
+        let lines = cell.display_lines(/*width*/ 44);
+        assert_eq!(
+            lines.iter().map(line_width).collect::<Vec<_>>(),
+            vec![44; lines.len()],
+        );
+        let rendered = render_lines(&lines).join("\n");
+        assert!(rendered.contains(&format!("(v{version})")));
+        frames.push(rendered);
+    }
+    insta::assert_snapshot!(frames.join("\n\n"));
+}
+
+#[test]
 fn session_header_clamps_to_narrow_width() {
     const WIDTH: u16 = 44;
     let cell = SessionHeaderHistoryCell::new(
