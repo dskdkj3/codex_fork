@@ -1907,3 +1907,90 @@ fn set_file_mtime(path: &Path, age: Duration) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn resource_guard_snapshot_worker() {
+    let Ok(expected) = std::env::var("GUARD_SNAPSHOT_RESULT") else {
+        return;
+    };
+    let shell = Shell {
+        shell_type: ShellType::Sh,
+        shell_path: PathBuf::from("/bin/sh"),
+    };
+    let result = run_script_with_timeout(
+        &shell,
+        "test -z \"${CODEX_RESOURCE_GUARD_SOCKET+x}\" && printf guarded",
+        Duration::from_secs(5),
+        SnapshotShellMode::NonLogin,
+        &AbsolutePathBuf::current_dir().unwrap(),
+        /*credential_broker*/ None,
+        /*sandbox*/ None,
+    )
+    .await;
+    if expected == "ok" {
+        assert_eq!(result.unwrap(), "guarded");
+    } else {
+        assert!(result.unwrap_err().to_string().contains(&expected));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_snapshot_preserves_resource_outcomes() {
+    use std::io::BufRead;
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    for (reply, expected) in [
+        ("ok\n", "ok"),
+        ("killed memory_limit\n", "Resource protection ended"),
+        ("denied\n", "outcome unavailable"),
+    ] {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("guard.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut worker = StdCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shell_snapshot::tests::resource_guard_snapshot_worker",
+                "--nocapture",
+            ])
+            .env(codex_utils_pty::resource_guard::SOCKET_ENV, &socket)
+            .env("GUARD_SNAPSHOT_RESULT", expected)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        for (expected_request, response) in [
+            ("reserve normal\n", "0123456789abcdef0123456789abcdef\n"),
+            ("attach 0123456789abcdef0123456789abcdef\n", "1\n"),
+            ("result 0123456789abcdef0123456789abcdef\n", reply),
+        ] {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() > deadline {
+                            let _ = worker.kill();
+                            panic!("snapshot resource guard request timed out");
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(request, expected_request);
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        assert!(worker.wait().unwrap().success());
+    }
+}
