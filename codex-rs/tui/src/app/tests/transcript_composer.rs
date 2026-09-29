@@ -88,7 +88,7 @@ async fn analytics_menu_reopen_preserves_navigation_and_explicit_view_selects_su
 {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let http = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
+    let account_checks = wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/backend-api/wham/accounts/check"))
         .and(wiremock::matchers::header(
             "chatgpt-account-id",
@@ -98,7 +98,7 @@ async fn analytics_menu_reopen_preserves_navigation_and_explicit_view_selects_su
             serde_json::json!({"accounts": [{"id": "test-account", "plan_type": "plus"}]}),
         ))
         .expect(/*r*/ 3)
-        .mount(&http)
+        .mount_as_scoped(&http)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .respond_with(
@@ -144,9 +144,12 @@ async fn analytics_menu_reopen_preserves_navigation_and_explicit_view_selects_su
                     press_key(&mut app, &mut tui, &mut app_server, KeyCode::Char('4')).await?;
                     continue;
                 }
-                if text.contains("Lifetime tokens")
+                // A rendered view can precede its new account request. Closing the
+                // overlay cancels that work, so also wait for this open's request.
+                if (text.contains("Lifetime tokens")
                     || text.contains("No activity")
-                    || text.contains("No data reported")
+                    || text.contains("No data reported"))
+                    && account_checks.received_requests().await.len() == screens.len() + 1
                 {
                     return Ok::<(), color_eyre::Report>(());
                 }
