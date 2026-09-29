@@ -276,6 +276,9 @@ fn clear_sixel_area(writer: &mut impl Write, area: SixelClearArea) -> std::io::R
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose;
+    use pretty_assertions::assert_eq;
     use std::error::Error as _;
     use std::io;
     use std::path::PathBuf;
@@ -347,30 +350,56 @@ mod tests {
     #[test]
     fn kitty_local_file_pet_image_uses_file_reference_without_inline_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let frame = dir.path().join("frame.png");
-        std::fs::write(&frame, b"png").unwrap();
-        let request = AmbientPetDraw {
-            frame,
-            protocol: ImageProtocol::KittyLocalFile,
-            x: 2,
-            y: 3,
-            clear_top_y: 3,
-            columns: 4,
-            rows: 2,
-            height_px: 75,
-            sixel_dir: PathBuf::new(),
-        };
-        let mut output = Vec::new();
-        let mut state = PetImageRenderState::default();
+        let mut alignments = [false; 3];
+        let mut exercised_old_false_positive = false;
+        for padding in ["", "x", "xx"] {
+            let parent = dir.path().join(format!("alignment{padding}"));
+            std::fs::create_dir(&parent).unwrap();
+            let frame = parent.join("frame.png");
+            std::fs::write(&frame, b"png").unwrap();
+            let canonical = frame.canonicalize().unwrap();
+            let path = canonical.to_string_lossy();
+            alignments[path.len() % 3] = true;
+            let request = AmbientPetDraw {
+                frame,
+                protocol: ImageProtocol::KittyLocalFile,
+                x: 2,
+                y: 3,
+                clear_top_y: 3,
+                columns: 4,
+                rows: 2,
+                height_px: 75,
+                sixel_dir: PathBuf::new(),
+            };
+            let mut output = Vec::new();
+            let mut state = PetImageRenderState::default();
 
-        render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
+            render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
 
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("a=d,d=I,i=49374,q=2;"));
-        assert!(output.contains("\x1b[4;3H"));
-        assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
-        assert!(!output.contains("cG5n"));
-        assert!(output.contains("\x1b8"));
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("a=d,d=I,i=49374,q=2;"));
+            assert!(output.contains("\x1b7"));
+            assert!(output.contains("\x1b[4;3H"));
+            let transmission = output
+                .split_once("\x1b_Ga=T,")
+                .expect("Kitty transmission")
+                .1;
+            let (parameters, payload) = transmission.split_once(';').expect("payload separator");
+            // The first ESC terminates the payload, including inside tmux passthrough.
+            let payload = payload.split_once('\x1b').expect("command terminator").0;
+            assert_eq!(parameters, "t=f,f=100,c=4,r=2,q=2,i=49374");
+            assert_eq!(
+                general_purpose::STANDARD.decode(payload).unwrap(),
+                path.as_bytes()
+            );
+            exercised_old_false_positive |= payload.contains("cG5n");
+            assert!(output.contains("\x1b8"));
+        }
+        assert_eq!(alignments, [true; 3]);
+        assert!(
+            exercised_old_false_positive,
+            "cover a path that resembles inline PNG bytes"
+        );
     }
 
     #[test]
