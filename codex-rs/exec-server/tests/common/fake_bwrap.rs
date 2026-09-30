@@ -6,7 +6,7 @@ pub(crate) fn write_fake_bwrap(bin_dir: &Path) -> anyhow::Result<PathBuf> {
     let fake_bwrap = bin_dir.join("bwrap");
     codex_utils_cargo_bin::write_executable(
         &fake_bwrap,
-        r#"#!/bin/bash
+        r#"#!/usr/bin/env bash
 set -euo pipefail
 
 for arg in "$@"; do

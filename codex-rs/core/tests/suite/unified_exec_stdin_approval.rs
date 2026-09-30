@@ -91,7 +91,7 @@ async fn stdin_reviews_retained_grants_after_turn_permissions_expire() -> Result
     let opened = mount_function_call_agent_response(
         harness.server(),
         "open",
-        &json!({"cmd":"/bin/bash --noprofile --norc", "tty":true, "yield_time_ms":200}).to_string(),
+        &json!({"cmd":"bash --noprofile --norc", "tty":true, "yield_time_ms":200}).to_string(),
         "exec_command",
     )
     .await;
@@ -225,7 +225,7 @@ async fn strict_stdin_review_reaches_guardian_with_sandbox_prompts_disabled() ->
             tool_response(
                 "open",
                 "exec_command",
-                json!({"cmd":"/bin/bash --noprofile --norc", "tty":true, "yield_time_ms":200}),
+                json!({"cmd":"bash --noprofile --norc", "tty":true, "yield_time_ms":200}),
             ),
             tool_response(
                 "baseline",
