@@ -134,7 +134,9 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
         if seen.len() > MAX_CUR_PROJECT_PATH_STATES {
             return None;
         }
-        let candidate = components.iter().fold(root.clone(), |path, component| path.join(component));
+        let candidate = components
+            .iter()
+            .fold(root.clone(), |path, component| path.join(component));
         if probes >= MAX_CUR_PROJECT_PATH_PROBES {
             return None;
         }
@@ -186,7 +188,12 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
 fn cur_directory_exists(path: &Path) -> Option<bool> {
     match fs::metadata(path) {
         Ok(metadata) => Some(metadata.is_dir()),
-        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
             Some(false)
         }
         // An inaccessible candidate could hide another match. Reject the

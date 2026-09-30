@@ -198,7 +198,10 @@ fn rejects_cur_project_when_probe_budget_cannot_rule_out_ambiguity() {
     fs::create_dir_all(&project).expect("project root");
     assert!(project.is_dir());
 
-    assert_eq!(decode_cur_project_path(&encode_project_path(&project)), None);
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        None
+    );
 }
 
 #[test]
@@ -266,8 +269,10 @@ fn rejects_cur_project_when_another_candidate_is_inaccessible() {
     let hidden = hidden_parent.join("c");
     fs::create_dir_all(&visible).expect("visible project");
     fs::create_dir_all(&hidden).expect("hidden project");
-    let original = fs::metadata(&hidden_parent).expect("hidden parent metadata").permissions();
-    let _restore = RestorePermissions(hidden_parent.clone(), original.clone());
+    let original = fs::metadata(&hidden_parent)
+        .expect("hidden parent metadata")
+        .permissions();
+    let _restore = RestorePermissions(hidden_parent.clone(), original);
     fs::set_permissions(&hidden_parent, fs::Permissions::from_mode(0o000))
         .expect("hide alternative candidate");
     // Ordinary users exercise the permission-error path. Privileged runners
@@ -275,11 +280,11 @@ fn rejects_cur_project_when_another_candidate_is_inaccessible() {
     if let Err(error) = fs::metadata(&hidden) {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
+    assert_eq!(encode_project_path(&visible), encode_project_path(&hidden));
     assert_eq!(
-        encode_project_path(&visible),
-        encode_project_path(&hidden)
+        decode_cur_project_path(&encode_project_path(&visible)),
+        None
     );
-    assert_eq!(decode_cur_project_path(&encode_project_path(&visible)), None);
 }
 
 #[test]
