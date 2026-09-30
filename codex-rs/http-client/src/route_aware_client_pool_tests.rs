@@ -22,6 +22,15 @@ use crate::OutboundProxyPolicy;
 
 #[tokio::test]
 async fn request_failures_classify_real_untrusted_certificate_handshakes() {
+    classify_real_untrusted_certificate_handshake(HttpClientBuilder::new()).await;
+}
+
+#[tokio::test]
+async fn request_failures_classify_real_untrusted_certificate_handshakes_with_rustls() {
+    classify_real_untrusted_certificate_handshake(HttpClientBuilder::new().with_rustls_tls()).await;
+}
+
+async fn classify_real_untrusted_certificate_handshake(client_builder: HttpClientBuilder) {
     codex_utils_rustls_provider::ensure_rustls_crypto_provider();
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("self-signed certificate should generate");
@@ -47,9 +56,10 @@ async fn request_failures_classify_real_untrusted_certificate_handshakes() {
             .expect("TLS server connection should be created");
         let _ = connection.complete_io(&mut stream);
     });
-    let pool = RouteAwareClientPool::new_without_request_logging(
+    let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
+        client_builder.without_request_logging(),
     );
 
     let request = pool
@@ -68,6 +78,25 @@ async fn request_failures_classify_real_untrusted_certificate_handshakes() {
         error.failure_class(),
         Some(RouteFailureClass::TlsError),
         "unexpected certificate error: {error:?}"
+    );
+}
+
+#[test]
+fn request_failures_classify_nested_typed_tls_errors_without_classifying_other_io_errors() {
+    let certificate_error = rustls::Error::InvalidCertificate(
+        rustls::CertificateError::UnknownIssuer,
+    );
+    let nested_tls_error = RouteAwareRequestError::Route(RouteAwareClientPoolError::Resolve(
+        io::Error::other(io::Error::new(io::ErrorKind::InvalidData, certificate_error)),
+    ));
+    let nested_other_error = RouteAwareRequestError::Route(RouteAwareClientPoolError::Resolve(
+        io::Error::other(io::Error::other("connection refused")),
+    ));
+
+    assert_eq!(nested_tls_error.failure_class(), Some(RouteFailureClass::TlsError));
+    assert_eq!(
+        nested_other_error.failure_class(),
+        Some(RouteFailureClass::ProxyResolutionUnavailable)
     );
 }
 
