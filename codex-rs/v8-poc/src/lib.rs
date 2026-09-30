@@ -65,8 +65,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_feature_matches_linked_v8() {
-        assert_eq!(super::linked_v8_has_sandbox(), cfg!(feature = "sandbox"));
+    fn explicit_sandbox_feature_requires_linked_v8_sandbox() {
+        // Cargo unifies dependency features across workspace packages, so V8 can have its
+        // sandbox enabled even when this crate did not request its own sandbox feature.
+        if cfg!(feature = "sandbox") {
+            assert!(super::linked_v8_has_sandbox());
+        }
     }
 
     #[test]
