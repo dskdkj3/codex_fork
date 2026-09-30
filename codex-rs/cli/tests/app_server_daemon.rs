@@ -519,10 +519,11 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     if initial == InitialDaemon::Missing {
         std::fs::remove_file(state.join("app-server.stderr.log"))?;
     }
-    std::fs::write(
-        state.join("settings.json"),
-        br#"{"shutdownGraceSeconds":0,"updater":{"autoUpdateEnabled":false}}"#,
-    )?;
+    let mut settings = serde_json::json!({"shutdownGraceSeconds": 0});
+    if action == "bootstrap" {
+        settings["updater"] = serde_json::json!({"autoUpdateEnabled": false});
+    }
+    std::fs::write(state.join("settings.json"), serde_json::to_vec(&settings)?)?;
     let cli_before = daemon.codex.canonicalize()?;
     let mut command = daemon.command();
     command.args(["app-server", "daemon", action]);
