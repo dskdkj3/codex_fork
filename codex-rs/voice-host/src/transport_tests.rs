@@ -65,9 +65,38 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
                     candidate.candidate_type() == rtc::ice::candidate::CandidateType::Host
                 })
                 .map(|candidate| candidate.addr())
-                .find(|addr| !addr.ip().is_loopback() && !addr.ip().is_unspecified())
-                .expect("local voice offer has a usable host candidate");
+                // The original remote fixture bound 0.0.0.0, so retain its
+                // IPv4 coverage while selecting a single reachable interface.
+                .find(|addr| {
+                    addr.is_ipv4() && !addr.ip().is_loopback() && !addr.ip().is_unspecified()
+                })
+                .expect("local voice offer has a usable IPv4 host candidate");
             let bind_addr = std::net::SocketAddr::new(bind_addr.ip(), 0);
+            let offer_candidates = offer_sdp
+                .lines()
+                .filter(|line| line.starts_with("a=candidate:"))
+                .count();
+            // The local peer listens on all interfaces, but this remote fixture
+            // only binds one. Advertise that same host IP to keep ICE checks on
+            // the interface that can reach the remote peer.
+            let selected_offer = offer_sdp
+                .lines()
+                .filter(|line| {
+                    let Some(candidate) = line.strip_prefix("a=candidate:") else {
+                        return true;
+                    };
+                    let candidate = rtc::ice::candidate::unmarshal_candidate(candidate)
+                        .expect("local voice offer candidate");
+                    candidate.candidate_type() == rtc::ice::candidate::CandidateType::Host
+                        && candidate.addr().ip() == bind_addr.ip()
+                })
+                .map(|line| format!("{line}\r\n"))
+                .collect::<String>();
+            let selected_candidates = selected_offer
+                .lines()
+                .filter(|line| line.starts_with("a=candidate:"))
+                .count();
+            assert!(selected_candidates > 0);
             let (media, mut remote_audio) = crate::audio_track::AudioTrack::new().unwrap();
             let builder = PeerConnectionBuilder::new()
                 .with_media_engine(media)
@@ -82,7 +111,7 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
             .await
             .unwrap();
             remote.add_track(remote_audio.track.clone()).await.unwrap();
-            let offer = RTCSessionDescription::offer(offer_sdp).unwrap();
+            let offer = RTCSessionDescription::offer(selected_offer).unwrap();
             remote.set_remote_description(offer).await.unwrap();
             let answer = remote.create_answer(/*options*/ None).await.unwrap();
             remote.set_local_description(answer).await.unwrap();
@@ -106,7 +135,12 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
                 .apply_answer(answer)
                 .await
                 .unwrap_or_else(|error| panic!("tcp={tcp}: {error}"));
-            assert_eq!(outcome, super::AnswerOutcome::Ready, "tcp={tcp}");
+            assert_eq!(
+                outcome,
+                super::AnswerOutcome::Ready,
+                "tcp={tcp}, selected_ip={}, offer_candidates={selected_candidates}/{offer_candidates}",
+                bind_addr.ip()
+            );
             let channel = channels.recv().await.unwrap();
             assert_eq!(
                 (
