@@ -10,8 +10,96 @@ fn check_mounts(
     mountinfo: &[u8],
 ) -> io::Result<()> {
     super::check_mounts(
-        directory, device, mount_id, mountinfo, /*masked_root*/ None,
+        directory,
+        device,
+        SocketFilesystem::Other,
+        mount_id,
+        mountinfo,
+        /*masked_root*/ None,
     )
+}
+
+fn check_btrfs_mounts(mount_id: Option<&str>, mountinfo: &[u8]) -> io::Result<()> {
+    super::check_mounts(
+        Path::new("/tmp/codex-daemon-1000"),
+        "0:40",
+        SocketFilesystem::Btrfs,
+        mount_id,
+        mountinfo,
+        /*masked_root*/ None,
+    )
+}
+
+#[test]
+fn accepts_btrfs_subvolume_device_mismatch() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n";
+    assert!(check_btrfs_mounts(Some("65"), mounts).is_ok());
+}
+
+#[test]
+fn accepts_btrfs_private_tmp_and_unrelated_subvolume() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n\
+                   66 65 0:31 /@/tmp/systemd-private/tmp /tmp rw - btrfs disk rw\n\
+                   67 65 0:31 /@other /other rw - btrfs disk rw\n";
+    assert!(check_btrfs_mounts(Some("66"), mounts).is_ok());
+}
+
+#[test]
+fn rejects_btrfs_private_tmp_with_exposed_backing_directory() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n\
+                   66 65 0:31 /@/systemd-private/tmp /tmp rw - btrfs disk rw\n";
+    assert_eq!(
+        check_btrfs_mounts(Some("66"), mounts).map_err(|error| error.kind()),
+        Err(io::ErrorKind::PermissionDenied),
+    );
+}
+
+#[test_case("0:31", "/@/tmp", "/alias"; "mount device ancestor alias")]
+#[test_case("0:40", "/@/tmp/codex-daemon-1000", "/alias"; "fd device directory alias")]
+#[test_case("0:31", "/@/tmp/codex-daemon-1000/rpc.sock", "/alias.sock"; "mount device socket alias")]
+fn rejects_btrfs_aliases_across_both_device_numbers(device: &str, root: &str, destination: &str) {
+    let mounts = format!(
+        "65 1 0:31 /@ / rw - btrfs disk rw\n\
+         66 65 {device} {root} {destination} rw - btrfs disk rw\n"
+    );
+    assert_eq!(
+        check_btrfs_mounts(Some("65"), mounts.as_bytes()).map_err(|error| error.kind()),
+        Err(io::ErrorKind::PermissionDenied),
+    );
+}
+
+#[test_case(SocketFilesystem::Other, "btrfs", Some("65"); "unverified descriptor filesystem")]
+#[test_case(SocketFilesystem::Btrfs, "ext4", Some("65"); "inconsistent mount filesystem")]
+#[test_case(SocketFilesystem::Btrfs, "btrfs", None; "unavailable mount id")]
+#[test_case(SocketFilesystem::Btrfs, "btrfs", Some("missing"); "missing mount id")]
+fn btrfs_mismatch_requires_verified_mount(
+    filesystem: SocketFilesystem,
+    mount_filesystem: &str,
+    mount_id: Option<&str>,
+) {
+    let mounts = format!("65 1 0:31 /@ / rw - {mount_filesystem} disk rw\n");
+    assert_eq!(
+        super::check_mounts(
+            Path::new("/tmp/codex-daemon-1000"),
+            "0:40",
+            filesystem,
+            mount_id,
+            mounts.as_bytes(),
+            /*masked_root*/ None,
+        )
+        .map_err(|error| error.kind()),
+        Err(io::ErrorKind::Other),
+    );
+}
+
+#[test]
+fn rejects_duplicate_btrfs_mount_id() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n\
+                   65 1 0:31 /@ / rw - btrfs disk rw\n";
+    assert_eq!(
+        check_btrfs_mounts(Some("65"), mounts).map_err(|error| error.kind()),
+        Err(io::ErrorKind::Other),
+    );
 }
 
 #[test_case("/tmp", "/host-tmp", false; "ancestor alias")]
@@ -191,7 +279,27 @@ fn masked_wslg_alias_does_not_allow_other_exposed_aliases() {
     let exposed = format!("{mounts}3 1 0:1 /tmp /host-tmp rw - ext4 disk rw\n");
     for mount_id in [Some("1"), None] {
         assert!(check_mounts(directory, "0:1", mount_id, mounts.as_bytes()).is_err());
-        assert!(super::check_mounts(directory, "0:1", mount_id, mounts.as_bytes(), mask).is_ok());
-        assert!(super::check_mounts(directory, "0:1", mount_id, exposed.as_bytes(), mask).is_err());
+        assert!(
+            super::check_mounts(
+                directory,
+                "0:1",
+                SocketFilesystem::Other,
+                mount_id,
+                mounts.as_bytes(),
+                mask
+            )
+            .is_ok()
+        );
+        assert!(
+            super::check_mounts(
+                directory,
+                "0:1",
+                SocketFilesystem::Other,
+                mount_id,
+                exposed.as_bytes(),
+                mask
+            )
+            .is_err()
+        );
     }
 }
