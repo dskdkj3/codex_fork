@@ -521,7 +521,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     }
     std::fs::write(
         state.join("settings.json"),
-        br#"{"shutdownGraceSeconds":0}"#,
+        br#"{"shutdownGraceSeconds":0,"updater":{"autoUpdateEnabled":false}}"#,
     )?;
     let cli_before = daemon.codex.canonicalize()?;
     let mut command = daemon.command();
