@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -14,6 +15,7 @@ use crate::permissions::FileSystemAccessMode::Write;
 use crate::permissions::FileSystemPath;
 use crate::permissions::FileSystemSandboxEntry;
 use crate::permissions::FileSystemSandboxPolicy;
+use crate::permissions::FileSystemSandboxPolicyContext;
 use crate::permissions::FileSystemSpecialPath;
 use crate::permissions::FileSystemSpecialPath::Minimal;
 use crate::permissions::FileSystemSpecialPath::Tmpdir;
@@ -115,29 +117,26 @@ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
     let result = intersection(&authority, &requested, &project);
     let policy = result.file_system_sandbox_policy();
 
-    // TMPDIR may contain this TempDir, making the root writable through the
-    // shared temp grant. Check workspace narrowing without that independent grant.
-    let mut authority_without_tmp = authority.file_system_sandbox_policy();
-    let mut requested_without_tmp = requested.file_system_sandbox_policy();
-    let temp_path = FileSystemPath::Special { value: Tmpdir };
-    for source in [&mut authority_without_tmp, &mut requested_without_tmp] {
-        source.entries.retain(|entry| entry.path != temp_path);
-    }
-    let narrowed = intersection(
-        &PermissionProfile::from_runtime_permissions(&authority_without_tmp, Enabled),
-        &PermissionProfile::from_runtime_permissions(&requested_without_tmp, Restricted),
-        &project,
-    )
-    .file_system_sandbox_policy();
+    // Keep :tmpdir independent of the workspace fixtures, which themselves live
+    // under the host's temporary directory.
+    let scratch = TempDir::new().expect("temporary directory grant");
+    let scratch_root = canonical(&scratch);
+    let cwd = PathUri::from_abs_path(&root);
+    let temporary_directories = [PathUri::from_abs_path(&scratch_root)];
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: None,
+        temporary_directories: Some(&temporary_directories),
+    };
     assert_eq!(
-        [&root, &project]
-            .map(|path| narrowed
-                .resolve_access_for_local_path_with_cwd(path.as_path(), root.as_path())),
-        [Read, Write]
+        [&root, &project, &scratch_root]
+            .map(|path| policy.resolve_access(&PathUri::from_abs_path(path), &context)),
+        [Read, Write, Write]
     );
     assert_eq!(result.network_sandbox_policy(), Restricted);
     assert!(policy.entries.contains(&special(Tmpdir, Write)));
-    for name in [".git", ".agents", ".codex"] {
+    for name in [".git", ".agents", ".codex", ".aws"] {
         let protected = project.join(name);
         assert!(!policy.can_write_local_path_with_cwd(protected.as_path(), root.as_path()));
         assert!(policy.entries.contains(&skipped(protected.into(), Read)));

@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::local::LocalHistoryNotesStore;
-use codex_api::ReqwestTransport;
 use codex_client::HttpTransport;
 use codex_client::RequestBody;
-use codex_login::default_client::create_client;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_login::default_client::create_transport_for_routes_async;
 use codex_model_provider::SharedModelProvider;
 use codex_utils_output_truncation::TruncationPolicy;
 use http::HeaderValue;
@@ -25,14 +26,23 @@ pub(crate) struct HistoryNotesBackend {
 
 #[derive(Clone)]
 enum BackendKind {
-    Codex(SharedModelProvider),
+    Codex {
+        provider: SharedModelProvider,
+        http_client_factory: HttpClientFactory,
+    },
     Local(Arc<LocalHistoryNotesStore>),
 }
 
 impl HistoryNotesBackend {
-    pub(crate) fn new(provider: SharedModelProvider) -> Self {
+    pub(crate) fn new(
+        provider: SharedModelProvider,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
         Self {
-            kind: BackendKind::Codex(provider),
+            kind: BackendKind::Codex {
+                provider,
+                http_client_factory,
+            },
         }
     }
 
@@ -57,7 +67,7 @@ impl HistoryNotesBackend {
         if !arguments.is_object() {
             return Err("History tool arguments must be a JSON object".to_string());
         }
-        let provider = match &self.kind {
+        let (provider, http_client_factory) = match &self.kind {
             BackendKind::Local(store) => {
                 let result = if path == "alpha/notes/v2/thread_hint" {
                     store.thread_hint()
@@ -72,7 +82,10 @@ impl HistoryNotesBackend {
                 }
                 return Ok(result);
             }
-            BackendKind::Codex(provider) => provider,
+            BackendKind::Codex {
+                provider,
+                http_client_factory,
+            } => (provider, http_client_factory),
         };
         let Some(arguments_object) = arguments.as_object_mut() else {
             return Err("History tool arguments must be a JSON object".to_string());
@@ -122,7 +135,11 @@ impl HistoryNotesBackend {
         let request = auth.apply_auth(request).await.map_err(|_| {
             format!("{OPERATION_ERROR_PREFIX} Could not apply backend authentication.")
         })?;
-        let response = ReqwestTransport::from_http_client(create_client())
+        let transport =
+            create_transport_for_routes_async(http_client_factory.clone(), ClientRouteClass::Api)
+                .await
+                .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
+        let response = transport
             .execute(request)
             .await
             .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
