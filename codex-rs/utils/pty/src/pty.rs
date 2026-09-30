@@ -450,24 +450,14 @@ async fn spawn_process_preserving_fds(
     let wait_exit_status = Arc::clone(&exit_status);
     let exit_code = Arc::new(StdMutex::new(None));
     let wait_exit_code = Arc::clone(&exit_code);
-    let on_exit = move |status: std::io::Result<std::process::ExitStatus>| {
-        let code = match status {
-            Ok(status) if uses_portable_status => {
-                portable_pty::ExitStatus::from(status).exit_code() as i32
-            }
-            Ok(status) => exit_code_from_status(status),
-            Err(_) => -1,
-        };
-        #[cfg(target_os = "linux")]
-        let code = if let Some(guard) = resource_guard {
-            let outcome = guard.finish_blocking(code);
-            if let Some(message) = outcome.diagnostic {
-                let _ = diagnostic_tx.blocking_send(message.into_bytes());
-            }
-            outcome.exit_code
-        } else {
-            code
-        };
+    let code_from_status = move |status: std::io::Result<std::process::ExitStatus>| match status {
+        Ok(status) if uses_portable_status => {
+            portable_pty::ExitStatus::from(status).exit_code() as i32
+        }
+        Ok(status) => exit_code_from_status(status),
+        Err(_) => -1,
+    };
+    let report_exit = move |code| {
         wait_exit_status.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut guard) = wait_exit_code.lock() {
             *guard = Some(code);
@@ -475,9 +465,22 @@ async fn spawn_process_preserving_fds(
         let _ = exit_tx.send(code);
     };
     #[cfg(target_os = "linux")]
-    let wait_handle = tokio::spawn(async move { on_exit(child.wait().await) });
+    let wait_handle = tokio::spawn(async move {
+        let code = code_from_status(child.wait().await);
+        let code = if let Some(guard) = resource_guard {
+            let outcome = guard.finish(code).await;
+            if let Some(message) = outcome.diagnostic {
+                let _ = diagnostic_tx.send(message.into_bytes()).await;
+            }
+            outcome.exit_code
+        } else {
+            code
+        };
+        report_exit(code);
+    });
     #[cfg(not(target_os = "linux"))]
-    let wait_handle = tokio::task::spawn_blocking(move || on_exit(child.wait()));
+    let wait_handle =
+        tokio::task::spawn_blocking(move || report_exit(code_from_status(child.wait())));
 
     let handles = PtyHandles {
         _slave: None,
