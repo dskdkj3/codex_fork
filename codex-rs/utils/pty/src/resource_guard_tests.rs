@@ -27,7 +27,7 @@ fn guard_worker() {
         let result = if mode == "pty" || mode == "interactive" {
             crate::spawn_pty_process(
                 "/bin/sh", &args, std::path::Path::new("/"), &env,
-                /*arg0*/ &None, crate::TerminalSize::default(), &[],
+                /*arg0*/ &None, crate::TerminalSize::default(), crate::ChildFds::Inherited(&[]),
             ).await
         } else {
             crate::spawn_pipe_process(
