@@ -136,8 +136,10 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
         for (prepared, reader) in [(&mut prepared, first), (&mut concurrent, second)] {
             if let Some(reader) = reader {
                 let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
-                prepared.command[2] =
-                    prepared.command[2].replace(&format!("/dev/fd/{fd}"), "/dev/fd/SNAPSHOT");
+                let script = prepared.command.last_mut().expect("shell script argument");
+                let fd_path = format!("/dev/fd/{fd}");
+                assert!(script.contains(&fd_path));
+                *script = script.replace(&fd_path, "/dev/fd/SNAPSHOT");
             }
         }
         assert_eq!(
