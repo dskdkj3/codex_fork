@@ -3,12 +3,14 @@ use super::common::detect_recent_sessions;
 use crate::model::ExternalAgentSessionImportLimits;
 use crate::sessions::ExternalAgentSessionMigration;
 use crate::sessions::SessionRecordFormat;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-const MAX_CUR_PROJECT_PATH_PROBES: usize = 128;
+const MAX_CUR_PROJECT_PATH_PROBES: usize = 4096;
+const MAX_CUR_PROJECT_PATH_STATES: usize = 256;
 const CUR_PROJECT_SEPARATORS: [&str; 11] =
     ["-", "_", ".", " ", "--", "..", "__", "  ", "+", "@", "&"];
 
@@ -99,33 +101,45 @@ fn cur_project_cwd(project_storage: &Path, external_agent_home: &Path) -> Option
 
 fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
     #[cfg(not(windows))]
-    let mut path = PathBuf::from("/");
+    let root = PathBuf::from("/");
 
     #[cfg(windows)]
-    let (encoded, mut path) = {
+    let (encoded, root) = {
         let (drive, encoded) = decode_cur_windows_project_drive(encoded)?;
         (encoded, PathBuf::from(format!("{drive}:\\")))
     };
 
     let encoded = encoded.strip_prefix('-').unwrap_or(encoded);
-    for component in encoded.split('-') {
+    let components = encoded.split('-').map(str::to_owned).collect::<Vec<_>>();
+    for component in &components {
         if component.is_empty()
-            || matches!(component, "." | "..")
+            || matches!(component.as_str(), "." | "..")
             || component.contains(['/', '\\', ':'])
         {
             return None;
         }
-        path.push(component);
     }
 
+    // Only expand a joined component when its parent and the joined directory
+    // exist. This allows several punctuated ancestors without enumerating their
+    // contents, while a global probe bound keeps ambiguous encodings cheap.
+    let mut pending = vec![components];
+    let mut seen = HashSet::new();
     let mut matched_path = None;
     let mut probes = 0;
-    let mut inspect = |candidate: PathBuf| {
+    while let Some(components) = pending.pop() {
+        if !seen.insert(components.clone()) {
+            continue;
+        }
+        if seen.len() > MAX_CUR_PROJECT_PATH_STATES {
+            return None;
+        }
+        let candidate = components.iter().fold(root.clone(), |path, component| path.join(component));
         if probes >= MAX_CUR_PROJECT_PATH_PROBES {
             return None;
         }
         probes += 1;
-        if candidate.is_dir() {
+        if cur_directory_exists(&candidate)? {
             if matched_path
                 .as_ref()
                 .is_some_and(|matched_path| matched_path != &candidate)
@@ -134,79 +148,51 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
             }
             matched_path = Some(candidate);
         }
-        Some(())
-    };
-    inspect(path.clone())?;
 
-    for suffix_length in 2..=4 {
-        let mut parent = path.as_path();
-        let mut suffix = Vec::with_capacity(suffix_length);
-        for _ in 0..suffix_length {
-            let Some(component) = parent.file_name().and_then(|name| name.to_str()) else {
-                break;
-            };
-            suffix.push(component);
-            let Some(ancestor) = parent.parent() else {
-                break;
-            };
-            parent = ancestor;
-        }
-        if suffix.len() != suffix_length {
-            break;
-        }
-        suffix.reverse();
-
-        for separator in CUR_PROJECT_SEPARATORS {
-            inspect(parent.join(suffix.join(separator)))?;
-        }
-    }
-
-    let mut ancestor = path.parent();
-    while let Some(right) = ancestor {
-        let Some(right_name) = right.file_name().and_then(|name| name.to_str()) else {
-            break;
-        };
-        let Some(left) = right.parent() else {
-            break;
-        };
-        let Some(left_name) = left.file_name().and_then(|name| name.to_str()) else {
-            break;
-        };
-        let Some(prefix) = left.parent() else {
-            break;
-        };
-        let Ok(trailing) = path.strip_prefix(right) else {
-            return None;
-        };
-
-        for separator in CUR_PROJECT_SEPARATORS {
-            let merged_prefix = prefix.join(format!("{left_name}{separator}{right_name}"));
+        let mut parent = root.clone();
+        for start in 0..components.len() {
             if probes >= MAX_CUR_PROJECT_PATH_PROBES {
                 return None;
             }
             probes += 1;
-            if !merged_prefix.is_dir() {
-                continue;
+            if !cur_directory_exists(&parent)? {
+                break;
             }
-
-            if probes >= MAX_CUR_PROJECT_PATH_PROBES {
-                return None;
+            for end in start + 2..=components.len() {
+                for separator in CUR_PROJECT_SEPARATORS {
+                    if probes >= MAX_CUR_PROJECT_PATH_PROBES {
+                        return None;
+                    }
+                    probes += 1;
+                    let merged = components[start..end].join(separator);
+                    if !cur_directory_exists(&parent.join(&merged))? {
+                        continue;
+                    }
+                    let mut next = components[..start].to_vec();
+                    next.push(merged);
+                    next.extend_from_slice(&components[end..]);
+                    if !seen.contains(&next) {
+                        pending.push(next);
+                    }
+                }
             }
-            probes += 1;
-            let candidate = merged_prefix.join(trailing);
-            if !candidate.is_dir()
-                || matched_path
-                    .as_ref()
-                    .is_some_and(|matched_path| matched_path != &candidate)
-            {
-                return None;
-            }
-            matched_path = Some(candidate);
+            parent.push(&components[start]);
         }
-        ancestor = Some(left);
     }
 
     matched_path
+}
+
+fn cur_directory_exists(path: &Path) -> Option<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.is_dir()),
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+            Some(false)
+        }
+        // An inaccessible candidate could hide another match. Reject the
+        // encoding when the search cannot establish that it is unambiguous.
+        Err(_) => None,
+    }
 }
 
 #[cfg(any(windows, test))]

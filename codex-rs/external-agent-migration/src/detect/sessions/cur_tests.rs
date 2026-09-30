@@ -3,6 +3,8 @@ use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::SystemTime;
 use tempfile::TempDir;
@@ -176,6 +178,30 @@ fn rejects_ambiguous_encoded_project_cwd() {
 }
 
 #[test]
+fn resolves_cur_project_with_multiple_punctuated_ancestors() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root
+        .path()
+        .join("a/b/c/first-level/d/e/second_level/my-project");
+    fs::create_dir_all(&project).expect("project root");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        Some(project)
+    );
+}
+
+#[test]
+fn rejects_cur_project_when_probe_budget_cannot_rule_out_ambiguity() {
+    let root = TempDir::new().expect("tempdir");
+    let project = (0..35).fold(root.path().to_path_buf(), |path, _| path.join("a"));
+    fs::create_dir_all(&project).expect("project root");
+    assert!(project.is_dir());
+
+    assert_eq!(decode_cur_project_path(&encode_project_path(&project)), None);
+}
+
+#[test]
 fn resolves_cur_project_names_with_common_separators() {
     for (project_name, encoded_name) in [
         ("project", "project"),
@@ -222,6 +248,38 @@ fn rejects_ambiguous_cur_project_with_punctuated_ancestor() {
 
     assert_eq!(encoded, encode_project_path(&punctuated_leaf));
     assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_cur_project_when_another_candidate_is_inaccessible() {
+    struct RestorePermissions(PathBuf, fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.0, self.1.clone()).expect("restore directory permissions");
+        }
+    }
+
+    let root = TempDir::new().expect("tempdir");
+    let visible = root.path().join("a/b/c");
+    let hidden_parent = root.path().join("a-b");
+    let hidden = hidden_parent.join("c");
+    fs::create_dir_all(&visible).expect("visible project");
+    fs::create_dir_all(&hidden).expect("hidden project");
+    let original = fs::metadata(&hidden_parent).expect("hidden parent metadata").permissions();
+    let _restore = RestorePermissions(hidden_parent.clone(), original.clone());
+    fs::set_permissions(&hidden_parent, fs::Permissions::from_mode(0o000))
+        .expect("hide alternative candidate");
+    // Ordinary users exercise the permission-error path. Privileged runners
+    // may still see the second directory, which must also remain ambiguous.
+    if let Err(error) = fs::metadata(&hidden) {
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+    assert_eq!(
+        encode_project_path(&visible),
+        encode_project_path(&hidden)
+    );
+    assert_eq!(decode_cur_project_path(&encode_project_path(&visible)), None);
 }
 
 #[test]
