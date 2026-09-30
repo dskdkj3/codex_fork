@@ -178,6 +178,133 @@ fn rejects_ambiguous_encoded_project_cwd() {
 }
 
 #[test]
+fn rejects_mixed_punctuation_without_an_intermediate_directory() {
+    let root = TempDir::new().expect("tempdir");
+    let nested = root.path().join("a/b/c");
+    let alternative = root.path().join("a_b-c");
+    fs::create_dir_all(&nested).expect("nested project");
+    fs::create_dir_all(&alternative).expect("punctuated project");
+    assert!(!root.path().join("a_b").exists());
+
+    let encoded = encode_project_path(&nested);
+    assert_eq!(encoded, encode_project_path(&alternative));
+    assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[test]
+fn rejects_collapsed_punctuation_across_directory_boundaries() {
+    let root = TempDir::new().expect("tempdir");
+    let nested = root.path().join("a/b");
+    let alternative = root.path().join("a_/b");
+    fs::create_dir_all(&nested).expect("nested project");
+    fs::create_dir_all(&alternative).expect("punctuated project");
+
+    let encoded = encode_project_path(&nested);
+    assert_eq!(encoded, encode_project_path(&alternative));
+    assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[test]
+fn rejects_a_punctuation_only_descendant_after_an_exact_match() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("a-");
+    let descendant = project.join("-");
+    fs::create_dir_all(&descendant).expect("punctuation-only descendant");
+
+    let encoded = encode_project_path(&project);
+    assert_eq!(encoded, encode_project_path(&descendant));
+    assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[test]
+fn rejects_a_differently_cased_possible_cwd() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("foo-bar");
+    let differently_cased = root.path().join("Foo/bar");
+    fs::create_dir_all(&project).expect("project");
+    fs::create_dir_all(&differently_cased).expect("differently cased project");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_a_symlink_spelling_of_the_same_cwd() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("a/b/c");
+    fs::create_dir_all(&project).expect("project");
+    std::os::unix::fs::symlink(root.path().join("a/b"), root.path().join("a-b"))
+        .expect("symlink to project parent");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        None
+    );
+}
+
+#[test]
+fn rejects_emoji_and_two_hyphens_with_the_same_utf16_slug() {
+    let root = TempDir::new().expect("tempdir");
+    let emoji = root.path().join("a/😀");
+    let hyphens = root.path().join("a/--");
+    fs::create_dir_all(&emoji).expect("emoji project");
+    fs::create_dir_all(&hyphens).expect("hyphenated project");
+    let encode_per_unit = |path: &Path| {
+        path.to_string_lossy()
+            .encode_utf16()
+            .map(|unit| {
+                u8::try_from(unit)
+                    .ok()
+                    .filter(u8::is_ascii_alphanumeric)
+                    .map(char::from)
+                    .unwrap_or('-')
+            })
+            .collect::<String>()
+    };
+    let encoded = encode_per_unit(&emoji);
+    assert_eq!(encoded, encode_per_unit(&hyphens));
+    assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[test]
+fn keeps_explicit_cwd_when_project_slug_is_ambiguous() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("a/b/c");
+    let alternative = root.path().join("a_b-c");
+    fs::create_dir_all(&project).expect("project");
+    fs::create_dir_all(&alternative).expect("alternative project");
+    let external_agent_home = root.path().join(".external");
+    let encoded = encode_project_path(&project);
+    assert_eq!(decode_cur_project_path(&encoded), None);
+    let transcript = write_transcript(&external_agent_home, &encoded, "session", "first request");
+    fs::write(
+        &transcript,
+        format!(
+            "{}\n{}",
+            serde_json::json!({"cwd": project}),
+            serde_json::json!({
+                "role": "user",
+                "timestamp_ms": 1_800_000_000_000_i64,
+                "message": {"content": [{"type": "text", "text": "<user_query>first request</user_query>"}]}
+            })
+        ),
+    )
+    .expect("transcript with explicit cwd");
+
+    assert_eq!(
+        detect_recent_cur_sessions(&external_agent_home, root.path()).expect("detect sessions"),
+        vec![ExternalAgentSessionMigration {
+            path: transcript,
+            cwd: project,
+            title: Some("first request".to_string()),
+        }]
+    );
+}
+
+#[test]
 fn resolves_cur_project_with_multiple_punctuated_ancestors() {
     let root = TempDir::new().expect("tempdir");
     let project = root
@@ -194,9 +321,13 @@ fn resolves_cur_project_with_multiple_punctuated_ancestors() {
 #[test]
 fn rejects_cur_project_when_probe_budget_cannot_rule_out_ambiguity() {
     let root = TempDir::new().expect("tempdir");
-    let project = (0..35).fold(root.path().to_path_buf(), |path, _| path.join("a"));
+    // The trailing hyphen keeps a matching project searchable for punctuation-
+    // only descendants, so the entry budget is exhausted after finding it.
+    let project = root.path().join("project-");
     fs::create_dir_all(&project).expect("project root");
-    assert!(project.is_dir());
+    for index in 0..=MAX_CUR_PROJECT_PATH_ENTRIES {
+        fs::write(project.join(format!("unrelated-{index}")), "").expect("unrelated entry");
+    }
 
     assert_eq!(
         decode_cur_project_path(&encode_project_path(&project)),
@@ -273,18 +404,20 @@ fn rejects_cur_project_when_another_candidate_is_inaccessible() {
         .expect("hidden parent metadata")
         .permissions();
     let _restore = RestorePermissions(hidden_parent.clone(), original);
-    fs::set_permissions(&hidden_parent, fs::Permissions::from_mode(0o000))
-        .expect("hide alternative candidate");
-    // Ordinary users exercise the permission-error path. Privileged runners
-    // may still see the second directory, which must also remain ambiguous.
-    if let Err(error) = fs::metadata(&hidden) {
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    }
     assert_eq!(encode_project_path(&visible), encode_project_path(&hidden));
-    assert_eq!(
-        decode_cur_project_path(&encode_project_path(&visible)),
-        None
-    );
+    for mode in [0o000, 0o111] {
+        fs::set_permissions(&hidden_parent, fs::Permissions::from_mode(mode))
+            .expect("restrict alternative candidate");
+        // Ordinary users exercise both unreadable and traversable-but-unlistable
+        // paths. Privileged runners may see both candidates instead.
+        if let Err(error) = fs::read_dir(&hidden_parent) {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            decode_cur_project_path(&encode_project_path(&visible)),
+            None
+        );
+    }
 }
 
 #[test]
@@ -482,14 +615,16 @@ fn set_modified_at(path: &Path, modified_at: SystemTime) {
         .expect("set transcript modified time");
 }
 
-#[cfg(windows)]
 fn encode_project_path(path: &Path) -> String {
-    path.to_string_lossy().replace([':', '\\', '/'], "-")
-}
-
-#[cfg(not(windows))]
-fn encode_project_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .trim_start_matches('/')
-        .replace('/', "-")
+    let mut encoded = String::new();
+    for character in path.to_string_lossy().chars() {
+        if character.is_ascii_alphanumeric() {
+            encoded.push(character);
+        } else if !encoded.ends_with('-') {
+            encoded.push('-');
+        }
+    }
+    #[cfg(not(windows))]
+    encoded.remove(0);
+    encoded
 }

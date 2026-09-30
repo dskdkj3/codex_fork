@@ -3,16 +3,13 @@ use super::common::detect_recent_sessions;
 use crate::model::ExternalAgentSessionImportLimits;
 use crate::sessions::ExternalAgentSessionMigration;
 use crate::sessions::SessionRecordFormat;
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-const MAX_CUR_PROJECT_PATH_PROBES: usize = 4096;
+const MAX_CUR_PROJECT_PATH_ENTRIES: usize = 4096;
 const MAX_CUR_PROJECT_PATH_STATES: usize = 256;
-const CUR_PROJECT_SEPARATORS: [&str; 11] =
-    ["-", "_", ".", " ", "--", "..", "__", "  ", "+", "@", "&"];
 
 pub fn detect_recent_cur_sessions(
     external_agent_home: &Path,
@@ -110,96 +107,110 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
     };
 
     let encoded = encoded.strip_prefix('-').unwrap_or(encoded);
-    let components = encoded.split('-').map(str::to_owned).collect::<Vec<_>>();
-    for component in &components {
-        if component.is_empty()
-            || matches!(component.as_str(), "." | "..")
-            || component.contains(['/', '\\', ':'])
-        {
-            return None;
-        }
+    if encoded.is_empty()
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
     }
 
-    // Only expand a joined component when its parent and the joined directory
-    // exist. This allows several punctuated ancestors without enumerating their
-    // contents, while a global probe bound keeps ambiguous encodings cheap.
-    let mut pending = vec![components];
-    let mut seen = HashSet::new();
+    // Cursor's slug loses separators and punctuation. Compare each complete
+    // native path against both observed encodings; encoding components on
+    // their own would miss runs spanning a directory boundary.
+    let mut pending = vec![root];
     let mut matched_path = None;
-    let mut probes = 0;
-    while let Some(components) = pending.pop() {
-        if !seen.insert(components.clone()) {
-            continue;
-        }
-        if seen.len() > MAX_CUR_PROJECT_PATH_STATES {
-            return None;
-        }
-        let candidate = components
-            .iter()
-            .fold(root.clone(), |path, component| path.join(component));
-        if probes >= MAX_CUR_PROJECT_PATH_PROBES {
-            return None;
-        }
-        probes += 1;
-        if cur_directory_exists(&candidate)? {
-            if matched_path
-                .as_ref()
-                .is_some_and(|matched_path| matched_path != &candidate)
-            {
+    let mut entries_seen = 0;
+    let mut states_seen = 1;
+    while let Some(parent) = pending.pop() {
+        // A traversable but unlistable directory may hide another matching
+        // project. Never accept a match until every possible branch is read.
+        for entry in fs::read_dir(&parent).ok()? {
+            let entry = entry.ok()?;
+            if entries_seen >= MAX_CUR_PROJECT_PATH_ENTRIES {
                 return None;
             }
-            matched_path = Some(candidate);
-        }
-
-        let mut parent = root.clone();
-        for start in 0..components.len() {
-            if probes >= MAX_CUR_PROJECT_PATH_PROBES {
+            entries_seen += 1;
+            let name = entry.file_name();
+            // Cursor operates on Unicode paths. An unrepresentable native name
+            // cannot safely be ruled out as another spelling of this slug.
+            name.to_str()?;
+            let candidate = entry.path();
+            let path = candidate.to_str()?;
+            let (per_unit, collapsed) = encode_cur_project_path(path)?;
+            let matches = [per_unit.as_str(), collapsed.as_str()];
+            let relevant = matches.iter().any(|candidate| {
+                encoded
+                    .get(..candidate.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(candidate))
+            });
+            if !relevant {
+                continue;
+            }
+            if !fs::metadata(&candidate).ok()?.is_dir() {
+                continue;
+            }
+            let exact = matches.contains(&encoded);
+            let possible = matches
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(encoded));
+            if possible && !exact {
+                // A differently cased on-disk name can be the same cwd on a
+                // case-insensitive filesystem. It may hide a second match.
                 return None;
             }
-            probes += 1;
-            if !cur_directory_exists(&parent)? {
-                break;
-            }
-            for end in start + 2..=components.len() {
-                for separator in CUR_PROJECT_SEPARATORS {
-                    if probes >= MAX_CUR_PROJECT_PATH_PROBES {
-                        return None;
-                    }
-                    probes += 1;
-                    let merged = components[start..end].join(separator);
-                    if !cur_directory_exists(&parent.join(&merged))? {
-                        continue;
-                    }
-                    let mut next = components[..start].to_vec();
-                    next.push(merged);
-                    next.extend_from_slice(&components[end..]);
-                    if !seen.contains(&next) {
-                        pending.push(next);
-                    }
+            if exact {
+                if matched_path
+                    .as_ref()
+                    .is_some_and(|matched_path| matched_path != &candidate)
+                {
+                    return None;
                 }
+                matched_path = Some(candidate.clone());
             }
-            parent.push(&components[start]);
+            if matches.iter().any(|candidate| {
+                encoded
+                    .get(..candidate.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(candidate))
+                    && (candidate.len() < encoded.len() || candidate.ends_with('-'))
+            }) {
+                if states_seen >= MAX_CUR_PROJECT_PATH_STATES {
+                    return None;
+                }
+                states_seen += 1;
+                pending.push(candidate);
+            }
         }
     }
 
     matched_path
 }
 
-fn cur_directory_exists(path: &Path) -> Option<bool> {
-    match fs::metadata(path) {
-        Ok(metadata) => Some(metadata.is_dir()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Some(false)
+fn encode_cur_project_path(path: &str) -> Option<(String, String)> {
+    let mut per_unit = String::with_capacity(path.len());
+    let mut collapsed = String::with_capacity(path.len());
+    for unit in path.encode_utf16() {
+        let byte = u8::try_from(unit).ok();
+        let ascii = byte.filter(u8::is_ascii_alphanumeric);
+        if let Some(byte) = ascii {
+            let character = char::from(byte);
+            per_unit.push(character);
+            collapsed.push(character);
+        } else {
+            per_unit.push('-');
+            if !collapsed.ends_with('-') {
+                collapsed.push('-');
+            }
         }
-        // An inaccessible candidate could hide another match. Reject the
-        // encoding when the search cannot establish that it is unambiguous.
-        Err(_) => None,
     }
+    #[cfg(windows)]
+    let (per_unit, collapsed) = (per_unit.get(2..)?, collapsed.get(2..)?);
+    #[cfg(not(windows))]
+    let (per_unit, collapsed) = (per_unit.as_str(), collapsed.as_str());
+    Some((
+        per_unit.strip_prefix('-').unwrap_or(per_unit).to_string(),
+        collapsed.strip_prefix('-').unwrap_or(collapsed).to_string(),
+    ))
 }
 
 #[cfg(any(windows, test))]

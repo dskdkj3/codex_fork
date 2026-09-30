@@ -48,6 +48,30 @@ fn btrfs_bind_mount_masks_aliases_for_both_device_numbers() {
     );
 }
 
+#[test]
+fn btrfs_private_tmp_ignores_unrelated_subvolume() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n\
+                   66 65 0:31 /@/tmp/systemd-private/tmp /tmp rw - btrfs disk rw\n\
+                   67 65 0:31 /@other /other rw - btrfs disk rw\n";
+    assert_eq!(
+        check_btrfs_mounts("66", mounts).unwrap(),
+        BTreeSet::from([PathBuf::from("/tmp/codex-daemon-1000")]),
+    );
+}
+
+#[test]
+fn btrfs_private_tmp_masks_exposed_backing_directory() {
+    let mounts = b"65 1 0:31 /@ / rw - btrfs disk rw\n\
+                   66 65 0:31 /@/systemd-private/tmp /tmp rw - btrfs disk rw\n";
+    assert_eq!(
+        check_btrfs_mounts("66", mounts).unwrap(),
+        BTreeSet::from([
+            PathBuf::from("/tmp/codex-daemon-1000"),
+            PathBuf::from("/systemd-private/tmp/codex-daemon-1000"),
+        ]),
+    );
+}
+
 #[test_case(SocketFilesystem::Other, "btrfs", Some("1"); "unverified descriptor filesystem")]
 #[test_case(SocketFilesystem::Btrfs, "ext4", Some("1"); "inconsistent mount filesystem")]
 #[test_case(SocketFilesystem::Btrfs, "btrfs", None; "unavailable mount id")]
