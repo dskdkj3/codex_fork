@@ -511,6 +511,16 @@ unset __CODEX_SNAPSHOT_ORIGINAL_ENV_SET __CODEX_SNAPSHOT_ORIGINAL_ENV \
         )
     };
 
+    #[cfg(target_os = "linux")]
+    let rewritten_script =
+        if command[2].lines().next() == Some(codex_utils_pty::resource_guard::BUILD_DIRECTIVE) {
+            format!(
+                "{}\n{rewritten_script}",
+                codex_utils_pty::resource_guard::BUILD_DIRECTIVE
+            )
+        } else {
+            rewritten_script
+        };
     let wrapper_flag = if brokered && session_shell.shell_type == ShellType::Zsh {
         brokered_zsh_flag
     } else {

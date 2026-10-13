@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::local::LocalHistoryNotesStore;
 use codex_client::HttpTransport;
 use codex_client::RequestBody;
 use codex_http_client::ClientRouteClass;
@@ -19,8 +21,16 @@ const OPERATION_ERROR_PREFIX: &str = "Unable to perform operation:";
 
 #[derive(Clone)]
 pub(crate) struct HistoryNotesBackend {
-    provider: SharedModelProvider,
-    http_client_factory: HttpClientFactory,
+    kind: BackendKind,
+}
+
+#[derive(Clone)]
+enum BackendKind {
+    Codex {
+        provider: SharedModelProvider,
+        http_client_factory: HttpClientFactory,
+    },
+    Local(Arc<LocalHistoryNotesStore>),
 }
 
 impl HistoryNotesBackend {
@@ -29,9 +39,21 @@ impl HistoryNotesBackend {
         http_client_factory: HttpClientFactory,
     ) -> Self {
         Self {
-            provider,
-            http_client_factory,
+            kind: BackendKind::Codex {
+                provider,
+                http_client_factory,
+            },
         }
+    }
+
+    pub(crate) fn local(store: LocalHistoryNotesStore) -> Self {
+        Self {
+            kind: BackendKind::Local(Arc::new(store)),
+        }
+    }
+
+    pub(crate) fn is_local(&self) -> bool {
+        matches!(self.kind, BackendKind::Local(_))
     }
 
     pub(crate) async fn call(
@@ -42,6 +64,29 @@ impl HistoryNotesBackend {
         mut arguments: Value,
         truncation_policy: TruncationPolicy,
     ) -> Result<Value, String> {
+        if !arguments.is_object() {
+            return Err("History tool arguments must be a JSON object".to_string());
+        }
+        let (provider, http_client_factory) = match &self.kind {
+            BackendKind::Local(store) => {
+                let result = if path == "alpha/notes/v2/thread_hint" {
+                    store.thread_hint()
+                } else {
+                    store.call(path, arguments).await?
+                };
+                if result.to_string().len() > 8_000 {
+                    return Err(
+                        "Local context result exceeds the output limit; request a smaller range."
+                            .to_string(),
+                    );
+                }
+                return Ok(result);
+            }
+            BackendKind::Codex {
+                provider,
+                http_client_factory,
+            } => (provider, http_client_factory),
+        };
         let Some(arguments_object) = arguments.as_object_mut() else {
             return Err("History tool arguments must be a JSON object".to_string());
         };
@@ -53,14 +98,14 @@ impl HistoryNotesBackend {
             }),
         );
 
-        let provider = self.provider.api_provider().await.map_err(|_| {
+        let api_provider = provider.api_provider().await.map_err(|_| {
             format!("{OPERATION_ERROR_PREFIX} Could not resolve the backend provider.")
         })?;
-        let auth = self.provider.api_auth().await.map_err(|_| {
+        let auth = provider.api_auth().await.map_err(|_| {
             format!("{OPERATION_ERROR_PREFIX} Could not resolve backend authentication.")
         })?;
 
-        let mut request = provider.build_request(Method::POST, path);
+        let mut request = api_provider.build_request(Method::POST, path);
         let encoded_truncation_policy =
             serde_json::to_string(&truncation_policy).map_err(|_| {
                 format!("{OPERATION_ERROR_PREFIX} Could not encode the output truncation policy.")
@@ -90,12 +135,10 @@ impl HistoryNotesBackend {
         let request = auth.apply_auth(request).await.map_err(|_| {
             format!("{OPERATION_ERROR_PREFIX} Could not apply backend authentication.")
         })?;
-        let transport = create_transport_for_routes_async(
-            self.http_client_factory.clone(),
-            ClientRouteClass::Api,
-        )
-        .await
-        .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
+        let transport =
+            create_transport_for_routes_async(http_client_factory.clone(), ClientRouteClass::Api)
+                .await
+                .map_err(|_| format!("{OPERATION_ERROR_PREFIX} The backend request failed."))?;
         let response = transport
             .execute(request)
             .await

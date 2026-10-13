@@ -324,6 +324,13 @@ impl ShellSnapshotCache {
             "{startup}if ! {restore} >/dev/null; then printf 'failed to restore shell snapshot\\n' >&2; fi\n{}",
             params.argv[2]
         );
+        if shell_type == ShellType::Bash {
+            // Restricted-network seccomp can make Bash mistake stdin for a
+            // remote connection. Replay already restores captured startup state.
+            prepared
+                .command
+                .insert(shell_start + 1, "--norc".to_string());
+        }
 
         telemetry.shell_snapshot_command(wait, availability, "used");
         Ok(reader)
@@ -402,6 +409,25 @@ async fn capture_snapshot(
     if let Some(arg0) = &prepared.arg0 {
         command.arg0(arg0);
     }
+    #[cfg(target_os = "linux")]
+    let resource_guard = codex_utils_pty::resource_guard::ResourceGuard::prepare(args)
+        .await
+        .map_err(|err| {
+            (
+                "resource_admission",
+                internal_error(format!("shell snapshot admission failed: {err}")),
+            )
+        })?;
+    #[cfg(target_os = "linux")]
+    {
+        command.env_remove(codex_utils_pty::resource_guard::SOCKET_ENV);
+        if let Some(guard) = &resource_guard {
+            let attachment = guard.attachment();
+            unsafe {
+                command.pre_exec(move || attachment.attach());
+            }
+        }
+    }
     if let Some(probe) = &probe {
         let fd = probe.as_raw_fd();
         // SAFETY: the caller owns the CLOEXEC reader through spawn. This only
@@ -454,6 +480,13 @@ async fn capture_snapshot(
                 internal_error(format!("cannot finish shell snapshot: {err}")),
             )
         })?;
+        #[cfg(target_os = "linux")]
+        if let Some(guard) = resource_guard {
+            let outcome = guard.finish(status.code().unwrap_or(137)).await;
+            if let Some(diagnostic) = outcome.diagnostic {
+                return Err(("resource_protection", internal_error(diagnostic)));
+            }
+        }
         if !status.success() {
             return Err((
                 "nonzero_exit",

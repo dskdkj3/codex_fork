@@ -12,6 +12,7 @@ jobs:
       argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
       argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
       codex: ${{ steps.detect.outputs.codex }}
+      tui_terminal: ${{ steps.detect.outputs.tui_terminal }}
       workflows: ${{ steps.detect.outputs.workflows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -35,22 +36,33 @@ jobs:
             files=("codex-rs/force" "tools/argument-comment-lint/force" ".github/force")
           fi
 
+          tui_terminal=false
           codex=false
           argument_comment_lint=false
           argument_comment_lint_package=false
           workflows=false
           for f in "${files[@]}"; do
             [[ $f == codex-rs/* ]] && codex=true
+            # Include shared Rust dependencies: they can change terminal startup
+            # or model responses even when tui/ itself is untouched.
+            case "$f" in
+              *.md|*.mdx|*.rst) ;;
+              codex-rs/*|justfile|.github/workflows/tui-terminal.yml|.github/workflows/rust-ci.yml|.github/actions/setup-ci/*)
+                tui_terminal=true ;;
+            esac
             [[ $f == codex-rs/* || $f == tools/argument-comment-lint/* || $f == justfile ]] && argument_comment_lint=true
             [[ $f == defs.bzl || $f == workspace_root_test_launcher.sh.tpl || $f == workspace_root_test_launcher.bat.tpl ]] && argument_comment_lint=true
             [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml ]] && argument_comment_lint_package=true
             [[ $f == .github/* ]] && workflows=true
           done
 
-          echo "argument_comment_lint=$argument_comment_lint" >> "$GITHUB_OUTPUT"
-          echo "argument_comment_lint_package=$argument_comment_lint_package" >> "$GITHUB_OUTPUT"
-          echo "codex=$codex" >> "$GITHUB_OUTPUT"
-          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+          {
+            echo "argument_comment_lint=$argument_comment_lint"
+            echo "argument_comment_lint_package=$argument_comment_lint_package"
+            echo "tui_terminal=$tui_terminal"
+            echo "codex=$codex"
+            echo "workflows=$workflows"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
@@ -215,6 +227,11 @@ jobs:
         if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'
         uses: ./.github/actions/check-clean-worktree
 
+  tui_terminal:
+    needs: changed
+    if: ${{ needs.changed.outputs.tui_terminal == 'true' }}
+    uses: ./.github/workflows/tui-terminal.yml
+
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
     name: CI results (required)
@@ -223,6 +240,7 @@ jobs:
         changed,
         general,
         cargo_shear,
+        tui_terminal,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
@@ -236,6 +254,10 @@ jobs:
           echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
           echo "general: ${{ needs.general.result }}"
           echo "shear  : ${{ needs.cargo_shear.result }}"
+
+          if [[ "${NEEDS_CHANGED_OUTPUTS_TUI_TERMINAL}" == 'true' ]]; then
+            [[ '${{ needs.tui_terminal.result }}' == 'success' ]] || { echo 'tui_terminal failed'; exit 1; }
+          fi
 
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
@@ -257,6 +279,7 @@ jobs:
             [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
           fi
         env:
+          NEEDS_CHANGED_OUTPUTS_TUI_TERMINAL: ${{ needs.changed.outputs.tui_terminal }}
           NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}
           NEEDS_CHANGED_OUTPUTS_CODEX: ${{ needs.changed.outputs.codex }}
           NEEDS_CHANGED_OUTPUTS_WORKFLOWS: ${{ needs.changed.outputs.workflows }}

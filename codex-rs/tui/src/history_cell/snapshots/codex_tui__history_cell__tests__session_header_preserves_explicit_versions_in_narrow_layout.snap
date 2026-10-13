@@ -1,0 +1,24 @@
+---
+source: tui/src/history_cell/tests.rs
+expression: "frames.join(\"\\n\\n\")"
+---
+╭──────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.0.0)                 │
+│                                          │
+│ model:     gpt-5.6-sol xhigh   fast   /… │
+│ directory: project                       │
+╰──────────────────────────────────────────╯
+
+╭──────────────────────────────────────────╮
+│ >_ OpenAI Codex (v10.200.300)            │
+│                                          │
+│ model:     gpt-5.6-sol xhigh   fast   /… │
+│ directory: project                       │
+╰──────────────────────────────────────────╯
+
+╭──────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.156.1-alpha.12)      │
+│                                          │
+│ model:     gpt-5.6-sol xhigh   fast   /… │
+│ directory: project                       │
+╰──────────────────────────────────────────╯

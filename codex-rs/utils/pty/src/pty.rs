@@ -161,6 +161,12 @@ pub async fn spawn_process(
     let _ = inherited_fds;
 
     #[cfg(target_os = "linux")]
+    if std::env::var_os(crate::resource_guard::SOCKET_ENV).is_some() {
+        return spawn_process_preserving_fds(program, args, cwd, env, arg0, size, inherited_fds)
+            .await;
+    }
+
+    #[cfg(target_os = "linux")]
     if crate::spawn_helper::is_available()
         && inherited_fds.as_slice().is_empty()
         && Path::new(program).is_absolute()
@@ -346,8 +352,13 @@ async fn spawn_process_preserving_fds(
         builder.get_shell()
     });
     #[cfg(target_os = "linux")]
+    let resource_guard = crate::resource_guard::ResourceGuard::prepare(args).await?;
+    #[cfg(target_os = "linux")]
     let mut child = {
         let mut command = crate::Command::new(program);
+        if let Some(guard) = &resource_guard {
+            command.resource_attachment(guard.attachment());
+        }
         if let Some(shell) = &default_shell {
             // portable-pty supplies the login shell when SHELL is absent.
             command.env("SHELL", shell);
@@ -365,23 +376,31 @@ async fn spawn_process_preserving_fds(
         }
         command.stdout_file = Some(slave.try_clone()?.into());
         command.stderr_file = Some(slave.try_clone()?.into());
-        match crate::spawn_helper::spawn(&command, crate::spawn_helper::Setup::Pty).await? {
-            Some(child) => child,
-            None if inherited_fds.is_empty() => {
-                // Free the first PTY before allocating its portable replacement.
-                drop(command);
-                drop(io);
-                drop(slave);
-                drop(master);
-                return spawn_process_portable(program, args, cwd, env, arg0, size).await;
+        command.inner.env_remove(crate::resource_guard::SOCKET_ENV);
+        if resource_guard.is_some() {
+            unsafe {
+                command.inner.pre_exec(configure_child_terminal);
             }
-            None => {
-                // Explicit descriptors select the shared fallback on Linux. Keep
-                // terminal setup there when this executable cannot run the helper.
-                unsafe {
-                    command.inner.pre_exec(configure_child_terminal);
+            command.spawn()?
+        } else {
+            match crate::spawn_helper::spawn(&command, crate::spawn_helper::Setup::Pty).await? {
+                Some(child) => child,
+                None if inherited_fds.is_empty() => {
+                    // Free the first PTY before allocating its portable replacement.
+                    drop(command);
+                    drop(io);
+                    drop(slave);
+                    drop(master);
+                    return spawn_process_portable(program, args, cwd, env, arg0, size).await;
                 }
-                command.spawn()?
+                None => {
+                    // Explicit descriptors select the shared fallback on Linux. Keep
+                    // terminal setup there when this executable cannot run the helper.
+                    unsafe {
+                        command.inner.pre_exec(configure_child_terminal);
+                    }
+                    command.spawn()?
+                }
             }
         }
     };
@@ -421,6 +440,8 @@ async fn spawn_process_preserving_fds(
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
+    #[cfg(target_os = "linux")]
+    let diagnostic_tx = stdout_tx.clone();
     let (_stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(1);
     let (reader_handle, writer_handle) = io.spawn(stdout_tx, writer_rx, stdin_close_behavior);
 
@@ -429,14 +450,14 @@ async fn spawn_process_preserving_fds(
     let wait_exit_status = Arc::clone(&exit_status);
     let exit_code = Arc::new(StdMutex::new(None));
     let wait_exit_code = Arc::clone(&exit_code);
-    let on_exit = move |status: std::io::Result<std::process::ExitStatus>| {
-        let code = match status {
-            Ok(status) if uses_portable_status => {
-                portable_pty::ExitStatus::from(status).exit_code() as i32
-            }
-            Ok(status) => exit_code_from_status(status),
-            Err(_) => -1,
-        };
+    let code_from_status = move |status: std::io::Result<std::process::ExitStatus>| match status {
+        Ok(status) if uses_portable_status => {
+            portable_pty::ExitStatus::from(status).exit_code() as i32
+        }
+        Ok(status) => exit_code_from_status(status),
+        Err(_) => -1,
+    };
+    let report_exit = move |code| {
         wait_exit_status.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut guard) = wait_exit_code.lock() {
             *guard = Some(code);
@@ -444,9 +465,22 @@ async fn spawn_process_preserving_fds(
         let _ = exit_tx.send(code);
     };
     #[cfg(target_os = "linux")]
-    let wait_handle = tokio::spawn(async move { on_exit(child.wait().await) });
+    let wait_handle = tokio::spawn(async move {
+        let code = code_from_status(child.wait().await);
+        let code = if let Some(guard) = resource_guard {
+            let outcome = guard.finish(code).await;
+            if let Some(message) = outcome.diagnostic {
+                let _ = diagnostic_tx.send(message.into_bytes()).await;
+            }
+            outcome.exit_code
+        } else {
+            code
+        };
+        report_exit(code);
+    });
     #[cfg(not(target_os = "linux"))]
-    let wait_handle = tokio::task::spawn_blocking(move || on_exit(child.wait()));
+    let wait_handle =
+        tokio::task::spawn_blocking(move || report_exit(code_from_status(child.wait())));
 
     let handles = PtyHandles {
         _slave: None,

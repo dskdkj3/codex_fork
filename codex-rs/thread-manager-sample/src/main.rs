@@ -334,6 +334,8 @@ async fn new_config(
         memories: MemoriesConfig::default(),
         sqlite: SqliteConfig::from_sqlite_home(codex_home.clone()),
         log_dir: codex_home.join("log").to_path_buf(),
+        context_management_backend: Default::default(),
+        context_management_local_store_dir: codex_home.join("context-management-local"),
         codex_home,
         history: History::default(),
         ephemeral: true,

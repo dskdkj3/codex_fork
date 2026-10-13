@@ -251,6 +251,7 @@ mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
 mod input_queue;
+mod local_context;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -761,12 +762,22 @@ impl Session {
                 .prepare_token_budget_for_startup()
                 .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
             // Resolve activation for this runtime, including when resuming saved history.
-            token_budget::apply_experimental_context(
-                Arc::make_mut(&mut config),
-                auth.as_ref(),
-                &model_info,
-            )?;
+            if config.context_management_backend == codex_features::ContextManagementBackend::Local
+            {
+                local_context::activate(Arc::make_mut(&mut config), &session_source)?;
+            } else {
+                token_budget::apply_experimental_context(
+                    Arc::make_mut(&mut config),
+                    auth.as_ref(),
+                    &model_info,
+                )?;
+            }
             token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
+        }
+        if inherits_token_budget
+            && config.context_management_backend == codex_features::ContextManagementBackend::Local
+        {
+            local_context::activate(Arc::make_mut(&mut config), &session_source)?;
         }
         let configured_config = Arc::clone(&config);
         let multi_agent_version = config.multi_agent_version_override().or_else(|| {
@@ -1521,9 +1532,22 @@ impl Session {
     /// `TokenCount` event. Callers that need to replay restored usage to a client
     /// should use this accessor instead of `total_token_usage`, because the app-server
     /// notification includes both total and last-turn usage.
+    /// Resolve the selected model's compaction threshold so older rollouts and model
+    /// changes also report the current display budget before the next turn.
     pub(crate) async fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        let state = self.state.lock().await;
-        state.token_info()
+        let (mut info, settings, overrides) = {
+            let state = self.state.lock().await;
+            (
+                state.token_info()?,
+                Arc::clone(&state.session_configuration.step_settings),
+                state.session_configuration.model_info_overrides.clone(),
+            )
+        };
+        info.model_auto_compact_token_limit = settings
+            .resolve_model_info(self.services.models_manager.as_ref(), &overrides)
+            .await
+            .auto_compact_token_limit();
+        Some(info)
     }
 
     pub(crate) async fn get_estimated_token_count(
@@ -4813,6 +4837,7 @@ impl Session {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
                 model_context_window: None,
+                model_auto_compact_token_limit: None,
             });
 
             info.last_token_usage = TokenUsage {
@@ -4874,10 +4899,15 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (mut info, rate_limits) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()
         };
+        if let Some(info) = info.as_mut() {
+            info.model_auto_compact_token_limit = turn_context
+                .capture_current_model_info()
+                .auto_compact_token_limit();
+        }
         let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
         self.send_event(turn_context, event).await;
     }

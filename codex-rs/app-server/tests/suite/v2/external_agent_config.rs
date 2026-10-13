@@ -461,10 +461,16 @@ async fn external_agent_config_secondary_source_imports_session_and_plugin_end_t
     let project_root = codex_home.path().join("my-project");
     std::fs::create_dir_all(&project_root)?;
 
-    let encoded_project = project_root
-        .to_string_lossy()
-        .trim_start_matches(['/', '\\'])
-        .replace([':', '/', '\\'], "-");
+    let mut encoded_project = String::new();
+    for character in project_root.to_string_lossy().chars() {
+        if character.is_ascii_alphanumeric() {
+            encoded_project.push(character);
+        } else if !encoded_project.ends_with('-') {
+            encoded_project.push('-');
+        }
+    }
+    #[cfg(not(windows))]
+    encoded_project.remove(0);
     let session_path = source_home
         .join("projects")
         .join(encoded_project)

@@ -1067,6 +1067,12 @@ async fn run_script_with_timeout(
 
     // Handler is kept as guard to control the drop. The `mut` pattern is required because .args()
     // returns a ref of handler.
+    #[cfg(target_os = "linux")]
+    let resource_guard = codex_utils_pty::resource_guard::ResourceGuard::prepare(&args).await?;
+    #[cfg(target_os = "linux")]
+    let attachment = resource_guard
+        .as_ref()
+        .map(codex_utils_pty::resource_guard::ResourceGuard::attachment);
     let mut handler = Command::from(codex_utils_process::background_command(&args[0]));
     handler.args(&args[1..]);
     handler.stdin(Stdio::null());
@@ -1082,6 +1088,8 @@ async fn run_script_with_timeout(
         handler.envs(env);
     }
     codex_protocol::shell_environment::scrub_non_inheritable_env_vars(handler.as_std_mut());
+    #[cfg(target_os = "linux")]
+    handler.env_remove(codex_utils_pty::resource_guard::SOCKET_ENV);
     #[cfg(unix)]
     let output = {
         let settings = handler.as_std();
@@ -1099,6 +1107,10 @@ async fn run_script_with_timeout(
                 std::fs::File::open("/dev/null")?.into(),
             ))
             .process_mode(codex_utils_pty::ProcessMode::NewSession);
+        #[cfg(target_os = "linux")]
+        if let Some(attachment) = attachment {
+            command.resource_attachment(attachment);
+        }
         async move { command.spawn()?.wait_with_output().await }
     };
     #[cfg(not(unix))]
@@ -1108,6 +1120,13 @@ async fn run_script_with_timeout(
         .map_err(|_| anyhow!("Snapshot command timed out for {shell_name}"))?
         .with_context(|| format!("Failed to execute {shell_name}"))?;
 
+    #[cfg(target_os = "linux")]
+    if let Some(guard) = resource_guard {
+        let outcome = guard.finish(output.status.code().unwrap_or(137)).await;
+        if let Some(diagnostic) = outcome.diagnostic {
+            bail!(diagnostic);
+        }
+    }
     if !output.status.success() {
         let status = output.status;
         let stderr = String::from_utf8_lossy(&output.stderr);

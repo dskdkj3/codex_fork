@@ -63,6 +63,8 @@ mod patch_approval_tests;
 mod permission_selection_tests;
 #[path = "tests/projectless_tests.rs"]
 mod projectless_tests;
+#[path = "tests/prompt_edit_error_tests.rs"]
+mod prompt_edit_error_tests;
 #[path = "tests/unavailable_commands_tests.rs"]
 mod unavailable_commands;
 
@@ -7292,6 +7294,7 @@ fn token_usage_notification(
                 reasoning_output_tokens: 0,
             },
             model_context_window,
+            model_auto_compact_token_limit: None,
         },
     })
 }

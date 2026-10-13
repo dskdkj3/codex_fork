@@ -14,6 +14,7 @@ The workflows in this directory are split so that pull requests get fast, review
 - `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
   - `cargo fmt --check`
   - `cargo shear`
+  - the four tmux resize regressions on Linux for Rust changes, using `tui-terminal.yml`
   - `argument-comment-lint` on Linux, macOS, and Windows
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
 
@@ -29,9 +30,26 @@ The workflows in this directory are split so that pull requests get fast, review
   - release-profile Cargo builds
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
+  - the four tmux resize regressions through `tui-terminal.yml`
 
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
 - Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
 - Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+
+## TUI Terminal Delivery Gate
+
+`tui-terminal.yml` builds the CLI from the checked-out revision before running the
+four ignored `suite::resize_reflow::tmux_*` tests, with retries disabled. The PR
+workflow includes this job in its required result. It selects all Rust changes
+conservatively because shared dependencies can affect TUI startup and rendering;
+pure documentation changes do not trigger it. Full CI always runs it, and the
+workflow can also be dispatched for a complete TUI acceptance run.
+
+Ordinary `just test -p codex-tui` stays lightweight and leaves these tests ignored.
+For local terminal acceptance, use the build and filtered `just test` commands in
+`AGENTS.md`. Tests require tmux and local loopback access, use mock model responses,
+and isolate their terminal servers from user sessions. CLI construction is the
+main extra cost; the dedicated gate makes that cost visible instead of adding it
+to every focused test run.

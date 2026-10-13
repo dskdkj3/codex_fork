@@ -83,6 +83,8 @@ pub struct Command {
     pub(crate) inherited_fds: Vec<std::os::fd::RawFd>,
     #[cfg(target_os = "linux")]
     parent_pid: Option<libc::pid_t>,
+    #[cfg(target_os = "linux")]
+    resource_attachment: Option<crate::resource_guard::ChildAttachment>,
     #[cfg(unix)]
     pub(crate) stdout_file: Option<std::os::fd::OwnedFd>,
     #[cfg(unix)]
@@ -116,6 +118,8 @@ impl Command {
             inherited_fds: Vec::new(),
             #[cfg(target_os = "linux")]
             parent_pid: None,
+            #[cfg(target_os = "linux")]
+            resource_attachment: None,
             #[cfg(unix)]
             stdout_file: None,
             #[cfg(unix)]
@@ -230,6 +234,16 @@ impl Command {
         self
     }
 
+    /// Attach the child to its reserved resource group before target exec.
+    #[cfg(target_os = "linux")]
+    pub fn resource_attachment(
+        &mut self,
+        attachment: crate::resource_guard::ChildAttachment,
+    ) -> &mut Self {
+        self.resource_attachment = Some(attachment);
+        self
+    }
+
     #[cfg(unix)]
     pub fn arg0(&mut self, arg0: impl AsRef<OsStr>) -> &mut Self {
         self.saw_nul |= arg0.as_ref().as_encoded_bytes().contains(&0);
@@ -275,8 +289,9 @@ impl Command {
                 || matches!(self.process_mode, ProcessMode::NewSession)
                 || !self.inherited_fds.is_empty();
             #[cfg(target_os = "linux")]
-            let use_native =
-                matches!(self.process_mode, ProcessMode::NewSession) && self.parent_pid.is_none();
+            let use_native = matches!(self.process_mode, ProcessMode::NewSession)
+                && self.parent_pid.is_none()
+                && self.resource_attachment.is_none();
             if use_native
                 && !program.is_empty()
                 && let Some(child) = crate::child::posix::NativeChild::spawn(&self)?
@@ -297,15 +312,28 @@ impl Command {
             let targets = self.inherited_fds;
             #[cfg(target_os = "linux")]
             let parent_pid = self.parent_pid;
+            #[cfg(target_os = "linux")]
+            let resource_attachment = self.resource_attachment;
             #[cfg(not(target_os = "linux"))]
             let parent_pid: Option<i32> = None;
-            if new_session || explicit_fds || !targets.is_empty() || parent_pid.is_some() {
+            #[cfg(not(target_os = "linux"))]
+            let resource_attachment: Option<()> = None;
+            if new_session
+                || explicit_fds
+                || !targets.is_empty()
+                || parent_pid.is_some()
+                || resource_attachment.is_some()
+            {
                 // SAFETY: The caller keeps the selected descriptors open. Session
                 // and parent-death setup use system calls; Linux and macOS cleanup
                 // avoid allocation after fork. Other Unix targets have an
                 // allocation-after-fork risk documented on close_inherited_fds_except.
                 unsafe {
                     self.inner.pre_exec(move || {
+                        #[cfg(target_os = "linux")]
+                        if let Some(attachment) = resource_attachment {
+                            attachment.attach()?;
+                        }
                         if new_session {
                             crate::process_group::detach_from_tty()?;
                         }

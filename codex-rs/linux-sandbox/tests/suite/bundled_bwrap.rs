@@ -4,7 +4,6 @@ use codex_linux_sandbox::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_cargo_bin::copy_executable;
 use pretty_assertions::assert_eq;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -30,7 +29,8 @@ fn bazel_build_rejects_tampered_bundled_bwrap() {
 
     let sandbox_binary = package.path().join("codex-linux-sandbox");
     copy_executable(
-        Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox")),
+        &codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox")
+            .expect("codex-linux-sandbox binary"),
         &sandbox_binary,
     )
     .expect("sandbox binary should be copied into the package");

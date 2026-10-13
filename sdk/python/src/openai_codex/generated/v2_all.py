@@ -10416,6 +10416,9 @@ class ThreadTokenUsage(BaseModel):
         populate_by_name=True,
     )
     last: TokenUsageBreakdown
+    model_auto_compact_token_limit: Annotated[
+        int | None, Field(alias="modelAutoCompactTokenLimit")
+    ] = None
     model_context_window: Annotated[int | None, Field(alias="modelContextWindow")] = None
     total: TokenUsageBreakdown
 

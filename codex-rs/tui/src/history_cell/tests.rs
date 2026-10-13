@@ -1842,6 +1842,25 @@ fn completed_mcp_tool_call_multiple_outputs_inline_snapshot() {
 }
 
 #[test]
+fn session_header_preserves_explicit_versions_in_narrow_layout() {
+    for version in ["0.0.0", "10.200.300", "0.156.1-alpha.12"] {
+        let cell = SessionHeaderHistoryCell::new(
+            "gpt-5.6-sol".to_string(),
+            Some(ReasoningEffortConfig::XHigh),
+            PathBuf::from("project"),
+            version,
+        );
+        let lines = cell.display_lines(/*width*/ 44);
+        assert!(lines.iter().all(|line| line_width(line) <= 44));
+        assert!(
+            render_lines(&lines)
+                .join("\n")
+                .contains(&format!("(v{version})"))
+        );
+    }
+}
+
+#[test]
 fn session_header_clamps_to_narrow_width() {
     const WIDTH: u16 = 44;
     let cell = SessionHeaderHistoryCell::new(

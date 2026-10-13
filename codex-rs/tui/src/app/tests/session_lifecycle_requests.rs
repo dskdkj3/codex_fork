@@ -334,6 +334,7 @@ pub(super) enum HistoryCapabilities {
     ItemsAndSummaryTurnsFail,
     ThreadListFails,
     ThreadStartFails,
+    RevertFails,
     ConfigReadUnsupported(i64),
     ConfigReadFails,
     ConfigReadUnknownVoice,
@@ -563,6 +564,17 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         JSONRPCMessage::Response(JSONRPCResponse {
                             id: request_id,
                             result: serde_json::json!({}),
+                        })
+                    } else if history_capabilities == HistoryCapabilities::RevertFails
+                        && request.method == "thread/revert"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                message: "forced history persistence failure".to_string(),
+                                data: None,
+                            },
                         })
                     } else if (matches!(
                         history_capabilities,
@@ -1739,7 +1751,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 6);
-    for attempts in starts.chunks_exact(3) {
+    for attempts in starts.as_chunks::<3>().0 {
         assert_eq!(attempts[0]["dynamicTools"][0]["type"], "namespace");
         assert_eq!(attempts[0]["historyMode"], "paginated");
         assert_eq!(attempts[1]["dynamicTools"], serde_json::Value::Null);

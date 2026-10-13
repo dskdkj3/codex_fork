@@ -35,6 +35,9 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
     fs::write(private.join("sibling"), "sibling").unwrap();
     codex_utils_cargo_bin::copy_executable(&codex_linux_sandbox_exe(), &work.join("sandbox"))
         .unwrap();
+    let resources = work.join("codex-resources");
+    fs::create_dir(&resources).unwrap();
+    codex_utils_cargo_bin::copy_executable(&bwrap, &resources.join("bwrap")).unwrap();
 
     let path_entry = |path: &str, access| {
         FileSystemSandboxEntry::new(
@@ -68,6 +71,10 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
         command.args(
             "--ro-bind /usr /usr --ro-bind /etc /etc --proc /proc --dev /dev".split_whitespace(),
         );
+        // Nix-linked test executables and system tools load resources from the store.
+        if std::path::Path::new("/nix/store").is_dir() {
+            command.args(["--ro-bind", "/nix/store", "/nix/store"]);
+        }
         command.args("--dir /run --dir /.agents --symlink /private-link /.git".split_whitespace());
         command.args(["--symlink", codex_target, "/.codex"]);
         command.args(["--symlink", "/private/reopened", "/private-link"]);

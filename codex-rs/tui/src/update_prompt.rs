@@ -283,11 +283,14 @@ mod tests {
     use ratatui::widgets::FrameExt;
 
     fn new_prompt() -> UpdatePromptScreen {
-        UpdatePromptScreen::new(
-            FrameRequester::test_dummy(),
-            "9.9.9".into(),
-            UpdateAction::NpmGlobalLatest,
-        )
+        UpdatePromptScreen {
+            current_version: crate::version::DISPLAY_VERSION.to_string(),
+            ..UpdatePromptScreen::new(
+                FrameRequester::test_dummy(),
+                "9.9.9".into(),
+                UpdateAction::NpmGlobalLatest,
+            )
+        }
     }
 
     #[test]

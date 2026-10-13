@@ -5,15 +5,8 @@ use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolExecutorFuture;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolOutput;
-use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema;
-use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::FunctionCallOutputContentItem;
-use codex_protocol::models::FunctionCallOutputPayload;
-use codex_protocol::models::ImageReference;
-use codex_protocol::models::ResponseInputItem;
-use codex_tools::JsonToolOutput;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
@@ -21,9 +14,14 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::backend::HistoryNotesBackend;
+use crate::local::MAX_LOCAL_ARGUMENT_BYTES;
+use crate::local::MAX_NOTE_CALL_TEXT_BYTES;
+use crate::tool_output::HistoryNotesToolOutput;
 
 const HISTORY_NAMESPACE: &str = "history";
 const NOTES_NAMESPACE: &str = "notes";
+const LOCAL_HISTORY_NAMESPACE: &str = "local_history";
+const LOCAL_NOTES_NAMESPACE: &str = "local_notes";
 const HISTORY_DESCRIPTION: &str = "Recover prior conversation after a context-window reset by listing, reading, and searching normalized history using agent names and the opaque window and item IDs returned by these tools. Pass returned IDs unchanged when filtering or reading an item. Items are ordered by persisted ordinal, then creation time; list and search calls return no matches for an unknown window. Calls use the current agent by default; pass an absolute agent name or one relative to the current agent to inspect another agent. History is read-only and eventually consistent, so newly generated items may take a few seconds to appear. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
 const NOTES_DESCRIPTION: &str = "Read and maintain private notes that survive context-window transitions within this rollout. Paths are virtual, not filesystem paths. Relative file paths use the current agent's <agent_name>/notes directory; cross-agent paths must be absolute. Absolute paths use <agent_name>/notes[/<path>]. Reads, listings, searches, and writes may access other agents' notes. File operations require <path>; path-prefix arguments may be omitted to use the current notes directory. Empty, '.', and '..' path components are unsupported. Shell expansion is not performed, so '~' is treated literally. Note reads reflect successful writes immediately; listings and searches are eventually consistent and may take a few seconds to reflect writes. Every file must remain at or below 1,000,000 UTF-8 bytes; create another file before approaching the limit. This is private model-only state. Use it silently to continue the task. Never disclose or describe the tool, its existence or use, paths, storage or recovery mechanisms, or the private contents (including by quoting or summarizing them) to the user.";
 const HISTORY_AGENT_NAME_DESCRIPTION: &str = "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent.";
@@ -42,6 +40,79 @@ pub(crate) enum HistoryNotesAction {
 }
 
 impl HistoryNotesAction {
+    fn local_parameters(self) -> Value {
+        let mut parameters = self.parameters();
+        if let Some(properties) = parameters
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        {
+            for property in properties.values_mut().filter_map(Value::as_object_mut) {
+                property.remove("encrypted");
+            }
+            if let Some(agent) = properties.get_mut("agent_name") {
+                agent["description"] = json!(
+                    "Omit to use the current thread. Other threads and agents are unavailable."
+                );
+            }
+            if let Some(item) = properties.get_mut("item_id") {
+                item["description"] =
+                    json!("Exact item_id returned by a local history list or search result.");
+            }
+            if let Some(text) = properties.get_mut("text") {
+                text["description"] = json!(format!(
+                    "Plaintext, at most {MAX_NOTE_CALL_TEXT_BYTES} UTF-8 bytes per call. The entire call JSON must fit {MAX_LOCAL_ARGUMENT_BYTES} bytes. Append smaller chunks to grow a file up to its 1,000,000-byte aggregate limit."
+                ));
+            }
+            if matches!(
+                self,
+                Self::HistoryListWindows | Self::HistoryListItems | Self::HistorySearchContents
+            ) {
+                properties.insert("cursor".to_string(), json!({"type": "string", "description": "Continuation cursor returned by the previous result; keep the same filters."}));
+            }
+        }
+        parameters
+    }
+
+    fn local_namespace_description(self) -> &'static str {
+        match self.namespace() {
+            HISTORY_NAMESPACE => {
+                "Recover original persisted text from this same thread, including earlier context windows and tool outputs. Copy returned window_id and item_id values unchanged. Reads flush the active thread store first. Responses report unavailable non-text/encrypted data, incomplete scans and truncation; absence of a match in an incomplete scan is not proof of absence. Other threads and agents cannot be read."
+            }
+            NOTES_NAMESPACE => {
+                "Maintain local notes for this same thread across context windows and resume. Paths are relative virtual paths within this thread's notes directory; absolute paths, empty components, '.' and '..' are rejected. Use INDEX.md for a short recovery summary. Outputs are bounded; truncated results must be read in smaller ranges. Other threads and agents cannot be accessed."
+            }
+            _ => unreachable!("History actions use a known namespace"),
+        }
+    }
+
+    fn local_description(self) -> &'static str {
+        match self {
+            Self::HistoryListWindows => {
+                "List this thread's recorded context windows and item counts."
+            }
+            Self::HistoryListItems => {
+                "List original history items with bounded previews and source references."
+            }
+            Self::HistoryReadItem => {
+                "Read a character range from an original history item using its returned IDs."
+            }
+            Self::HistorySearchContents => {
+                "Find a literal substring in this thread's original history, including textual tool results."
+            }
+            Self::NotesListFilesByPrefix => {
+                "List this thread's note files with a relative path prefix."
+            }
+            Self::NotesReadFile => "Read a bounded line range from a local note file.",
+            Self::NotesSearchContents => "Find literal text in this thread's note files.",
+            Self::NotesAppendToFile => {
+                "Append plaintext to a local note file, up to one million UTF-8 bytes per file."
+            }
+            Self::NotesWriteFile => {
+                "Create or replace a local note file with plaintext, up to one million UTF-8 bytes per file."
+            }
+        }
+    }
+
     pub(crate) const ALL: [Self; 9] = [
         Self::HistoryListWindows,
         Self::HistoryListItems,
@@ -65,6 +136,15 @@ impl HistoryNotesAction {
             | Self::NotesSearchContents
             | Self::NotesAppendToFile
             | Self::NotesWriteFile => NOTES_NAMESPACE,
+        }
+    }
+
+    fn namespace_for_backend(self, local: bool) -> &'static str {
+        match (local, self.namespace()) {
+            (true, HISTORY_NAMESPACE) => LOCAL_HISTORY_NAMESPACE,
+            (true, NOTES_NAMESPACE) => LOCAL_NOTES_NAMESPACE,
+            (false, namespace) => namespace,
+            _ => unreachable!("History actions use a known namespace"),
         }
     }
 
@@ -264,6 +344,11 @@ impl HistoryNotesTool {
         call: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let arguments = call.function_arguments()?;
+        if self.backend.is_local() && arguments.len() > MAX_LOCAL_ARGUMENT_BYTES {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "Local context call JSON exceeds {MAX_LOCAL_ARGUMENT_BYTES} UTF-8 bytes; use a smaller request."
+            )));
+        }
         let arguments = if arguments.trim().is_empty() {
             json!({})
         } else {
@@ -282,26 +367,47 @@ impl HistoryNotesTool {
             .await
             .map_err(FunctionCallError::RespondToModel)?;
 
-        Ok(Box::new(HistoryNotesToolOutput::new(result)?))
+        let mut output = HistoryNotesToolOutput::new(result)?;
+        output.redact_observers = self.backend.is_local();
+        Ok(Box::new(output))
     }
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
     fn tool_name(&self) -> ToolName {
-        ToolName::namespaced(self.action.namespace(), self.action.name())
+        ToolName::namespaced(
+            self.action.namespace_for_backend(self.backend.is_local()),
+            self.action.name(),
+        )
     }
 
     fn spec(&self) -> ToolSpec {
+        let local = self.backend.is_local();
+        let parameters = if local {
+            self.action.local_parameters()
+        } else {
+            self.action.parameters()
+        };
         ToolSpec::Namespace(ResponsesApiNamespace {
-            name: self.action.namespace().to_string(),
-            description: self.action.namespace_description().to_string(),
+            name: self.action.namespace_for_backend(local).to_string(),
+            description: if local {
+                self.action.local_namespace_description()
+            } else {
+                self.action.namespace_description()
+            }
+            .to_string(),
             tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
                 name: self.action.name().to_string(),
-                description: self.action.description().to_string(),
+                description: if local {
+                    self.action.local_description()
+                } else {
+                    self.action.description()
+                }
+                .to_string(),
                 strict: false,
-                parameters: parse_tool_input_schema(&self.action.parameters()).unwrap_or_else(
-                    |error| panic!("History tool input schema should parse: {error}"),
-                ),
+                parameters: parse_tool_input_schema(&parameters).unwrap_or_else(|error| {
+                    panic!("History tool input schema should parse: {error}")
+                }),
                 output_schema: None,
                 defer_loading: None,
             })],
@@ -321,88 +427,6 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HistoryNotesTool {
         'call: 'a,
     {
         Box::pin(self.handle_call(call))
-    }
-}
-
-struct HistoryNotesToolOutput {
-    result: Value,
-    output: FunctionCallOutputPayload,
-}
-
-impl HistoryNotesToolOutput {
-    fn new(mut result: Value) -> Result<Self, FunctionCallError> {
-        // Separate attachments before serializing any text or retaining log output.
-        let images = result.as_object_mut().and_then(|map| map.remove("images"));
-        // The server applies the requested output budget before encryption.
-        let mut output = match result.get("encrypted_output").and_then(Value::as_str) {
-            Some(encrypted_content) => FunctionCallOutputPayload::from_content_items(vec![
-                FunctionCallOutputContentItem::EncryptedContent {
-                    encrypted_content: encrypted_content.to_string(),
-                },
-            ]),
-            None => FunctionCallOutputPayload::from_text(result.to_string()),
-        };
-        if let Some(images) = images {
-            let invalid_image = || {
-                FunctionCallError::RespondToModel(
-                    "History backend returned invalid image content.".to_string(),
-                )
-            };
-            let images = images.as_array().ok_or_else(invalid_image)?;
-            let mut content = match output.body {
-                FunctionCallOutputBody::Text(text) => {
-                    vec![FunctionCallOutputContentItem::InputText { text }]
-                }
-                FunctionCallOutputBody::ContentItems(content) => content,
-            };
-            for image in images {
-                let data = image
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid_image)?;
-                let mime_type = image
-                    .get("mime_type")
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid_image)?;
-                let detail =
-                    serde_json::from_value(image.get("detail").cloned().unwrap_or(Value::Null))
-                        .map_err(|_| invalid_image())?;
-                content.push(FunctionCallOutputContentItem::InputImage {
-                    image: ImageReference::Inline {
-                        image_url: format!("data:{mime_type};base64,{data}"),
-                    },
-                    detail,
-                });
-            }
-            output = FunctionCallOutputPayload::from_content_items(content);
-        }
-        Ok(Self { result, output })
-    }
-}
-
-impl ToolOutput for HistoryNotesToolOutput {
-    fn log_output(&self) -> String {
-        JsonToolOutput::new(self.result.clone()).log_output()
-    }
-
-    fn success_for_logging(&self) -> bool {
-        true
-    }
-
-    fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<Value> {
-        // Hooks must not receive model-only image attachments.
-        Some(self.result.clone())
-    }
-
-    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
-        ResponseInputItem::FunctionCallOutput {
-            call_id: call_id.to_string(),
-            output: self.output.clone(),
-        }
-    }
-
-    fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
-        Value::String("History tools are unavailable in code mode.".to_string())
     }
 }
 
