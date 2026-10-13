@@ -49,7 +49,11 @@ fn check_legacy_turn_safety(
         .and_then(|review| review.ignore_rules.as_ref());
     let ignores_prefix_rules = |model: &ModelInfo| {
         model.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER)
-            || ignored_models.is_some_and(|models| models.contains(&model.slug))
+            || ignored_models.is_some_and(|models| {
+                models
+                    .iter()
+                    .any(|ignored| ignored == model.request_model())
+            })
     };
 
     // Approval policy and required-model classification still have consumers

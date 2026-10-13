@@ -2683,6 +2683,38 @@
       },
       "type": "object"
     },
+    "ModelContextOverride": {
+      "additionalProperties": false,
+      "description": "Context policy for one exact model slug, independent of model discovery. Unspecified fields retain provider metadata; global context overrides take precedence.",
+      "properties": {
+        "auto_compact_token_limit": {
+          "description": "Auto-compaction threshold, still bounded by the model's effective context cap.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "context_window": {
+          "description": "Requested context window, still bounded by the provider's maximum window.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ModelContextPreset": {
+      "additionalProperties": false,
+      "description": "A local picker entry named `preset/model-slug`, using the suffix for requests. Capabilities are always inherited from the provider's exact model entry.",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "display_name"
+      ],
+      "type": "object"
+    },
     "ModelProviderAuthInfo": {
       "additionalProperties": false,
       "description": "Configuration for obtaining a provider bearer token from a command.",
@@ -7703,6 +7735,22 @@
         }
       ],
       "description": "Optional path to a JSON model catalog (applied on startup only). Per-thread `config` overrides are accepted but do not reapply this (no-ops)."
+    },
+    "model_context_overrides": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ModelContextOverride"
+      },
+      "default": {},
+      "description": "Context policy keyed by exact model slug, without replacing the provider catalog. Global model_context_window/model_auto_compact_token_limit overrides take precedence.",
+      "type": "object"
+    },
+    "model_context_presets": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ModelContextPreset"
+      },
+      "default": {},
+      "description": "Local picker entries keyed by `preset/model-slug`. Context settings live in model_context_overrides; requests use the exact model suffix.",
+      "type": "object"
     },
     "model_context_window": {
       "description": "Size of the context window for the model, in tokens.",

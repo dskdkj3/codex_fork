@@ -41,6 +41,8 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_protocol::ModelContextOverride;
+use codex_protocol::ModelContextPreset;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
@@ -179,6 +181,16 @@ pub struct ConfigToml {
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
+
+    /// Context policy keyed by exact model slug, without replacing the provider catalog.
+    /// Global model_context_window/model_auto_compact_token_limit overrides take precedence.
+    #[serde(default)]
+    pub model_context_overrides: BTreeMap<String, ModelContextOverride>,
+
+    /// Local picker entries keyed by `preset/model-slug`. Context settings live
+    /// in model_context_overrides; requests use the exact model suffix.
+    #[serde(default)]
+    pub model_context_presets: BTreeMap<String, ModelContextPreset>,
 
     /// Controls whether the auto-compaction limit applies to the full context or
     /// only to tokens after the carried prefix in the current compaction window.

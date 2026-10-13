@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/model_display_name_tests.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Select Model and Effort
+
+
+› 1. GPT-6 Astra (current)       Astra model
+  2. GPT-6 Astra (Long context)  Astra model
+
+  enter select · esc back

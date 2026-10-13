@@ -904,6 +904,18 @@ pub(crate) fn construct_model_info_from_candidates(
     candidates: &[ModelInfo],
     config: &ModelsManagerConfig,
 ) -> ModelInfo {
+    if config.model_context_presets.contains_key(model)
+        && let Some((_, base)) = model.split_once('/')
+    {
+        let mut info = candidates
+            .iter()
+            .find(|candidate| candidate.slug == base)
+            .cloned()
+            .unwrap_or_else(|| model_info::model_info_from_slug(base));
+        info.slug = model.to_string();
+        info.request_model = Some(base.to_string());
+        return model_info::with_config_overrides(info, config);
+    }
     // First use the normal longest-prefix match. If that misses, allow a narrowly scoped
     // retry for namespaced slugs like `custom/gpt-5.3-codex`.
     let remote = find_model_by_longest_prefix(model, candidates)
@@ -918,6 +930,7 @@ fn construct_model_info(
 ) -> ModelInfo {
     let model_info = if let Some(remote) = remote {
         ModelInfo {
+            request_model: None,
             slug: model.to_string(),
             used_fallback_model_metadata: false,
             ..remote

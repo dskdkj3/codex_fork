@@ -153,6 +153,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
     let specific = ModelInfo {
+        request_model: None,
         display_name: "GPT 5.3 Codex".to_string(),
         model_messages: Some(ModelMessages {
             instructions_template: Some("use specific prefix".to_string()),
@@ -161,6 +162,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
         ..specific
     };
     let generic = ModelInfo {
+        request_model: None,
         display_name: "GPT 5.3".to_string(),
         model_messages: Some(ModelMessages {
             instructions_template: Some("use generic prefix".to_string()),
@@ -567,6 +569,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         .await;
 
     let remote_model = ModelInfo {
+        request_model: None,
         slug: REMOTE_MODEL_SLUG.to_string(),
         display_name: "Remote Test".to_string(),
         description: Some("A remote model that requires the test shell".to_string()),
@@ -842,6 +845,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
 
     let remote_instructions = "Use the remote instructions template only.";
     let remote_model = ModelInfo {
+        request_model: None,
         slug: model.to_string(),
         display_name: "Parallel Remote".to_string(),
         description: Some("A remote model with custom instructions".to_string()),
@@ -1431,6 +1435,7 @@ fn test_remote_model_with_policy(
     truncation_policy: TruncationPolicyConfig,
 ) -> ModelInfo {
     ModelInfo {
+        request_model: None,
         slug: slug.to_string(),
         display_name: format!("{slug} display"),
         description: Some(format!("{slug} description")),

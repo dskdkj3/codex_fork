@@ -641,6 +641,12 @@ pub struct Config {
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
 
+    /// Context policy keyed by exact model slug; does not replace model discovery.
+    pub model_context_overrides: BTreeMap<String, codex_protocol::ModelContextOverride>,
+
+    /// Local context preset identities, independent of the provider model catalog.
+    pub model_context_presets: BTreeMap<String, codex_protocol::ModelContextPreset>,
+
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
@@ -1693,6 +1699,8 @@ impl Config {
         ModelsManagerConfig {
             model_context_window: self.model_context_window,
             model_auto_compact_token_limit: self.model_auto_compact_token_limit,
+            model_context_overrides: self.model_context_overrides.clone(),
+            model_context_presets: self.model_context_presets.clone(),
             tool_output_token_limit: self.tool_output_token_limit,
             base_instructions: self.base_instructions.clone().filter(|_| {
                 !matches!(
@@ -4336,6 +4344,20 @@ impl Config {
         )
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
+        for (id, preset) in &cfg.model_context_presets {
+            let valid_id = id.split_once('/').is_some_and(|(namespace, model)| {
+                !namespace.is_empty()
+                    && namespace.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    && !model.is_empty()
+                    && !model.contains('/')
+            });
+            if !valid_id || preset.display_name.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid model context preset {id:?}: expected preset/model-slug and a display name"),
+                ));
+            }
+        }
         let config = Self {
             prefer_mxc,
             model,
@@ -4344,6 +4366,8 @@ impl Config {
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+            model_context_overrides: cfg.model_context_overrides,
+            model_context_presets: cfg.model_context_presets,
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
                 .unwrap_or_default(),

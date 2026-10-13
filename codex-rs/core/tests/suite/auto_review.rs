@@ -597,6 +597,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
 
 fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> ModelInfo {
     ModelInfo {
+        request_model: None,
         slug: slug.to_string(),
         display_name: format!("{slug} display"),
         description: Some(format!("{slug} description")),

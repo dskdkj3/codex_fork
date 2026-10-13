@@ -765,7 +765,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
 
         let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
+            model: model_info.request_model().to_string(),
             raw_memories,
             reasoning: effort
                 .map(|effort| model_info.resolve_reasoning_effort(effort))
@@ -994,7 +994,7 @@ impl ModelClient {
         }
         let client_metadata = responses_metadata.client_metadata(include_internal);
         let request = ResponsesApiRequest {
-            model: model_info.slug.clone(),
+            model: model_info.request_model().to_string(),
             input,
             tools,
             tool_choice: "auto".to_string(),
@@ -1495,12 +1495,12 @@ impl ModelClientSession {
             );
             let responses_headers = self
                 .client
-                .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+                .responses_headers(client_setup.auth.as_ref(), model_info.request_model());
             let mut websocket_metadata = responses_metadata.clone();
             websocket_metadata.routing_hint = self.client.build_routing_hint_header(
                 client_setup.auth.as_ref(),
                 &responses_headers,
-                &model_info.slug,
+                model_info.request_model(),
                 model_info
                     .service_tier_for_request(service_tier.clone())
                     .as_deref(),
@@ -1688,7 +1688,7 @@ impl ModelClientSession {
                 .include_internal_metadata(&client_setup.api_provider);
             let responses_headers = self
                 .client
-                .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+                .responses_headers(client_setup.auth.as_ref(), model_info.request_model());
             tracing::Span::current().record("api.path", "/responses");
             let transport = self.client.build_api_transport(
                 &client_setup.api_provider,
@@ -1760,7 +1760,7 @@ impl ModelClientSession {
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
                 &self.client.state.thread_id.to_string(),
-                &model_info.slug,
+                model_info.request_model(),
                 codex_extension_api::ModelRequestKind::Generation,
                 &mut request.client_metadata,
             );
@@ -1884,7 +1884,7 @@ impl ModelClientSession {
                 .include_internal_metadata(&client_setup.api_provider);
             let responses_headers = self
                 .client
-                .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+                .responses_headers(client_setup.auth.as_ref(), model_info.request_model());
             tracing::Span::current().record("api.path", "/responses");
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
@@ -2047,7 +2047,7 @@ impl ModelClientSession {
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
                 &self.client.state.thread_id.to_string(),
-                &model_info.slug,
+                model_info.request_model(),
                 if warmup {
                     codex_extension_api::ModelRequestKind::Warmup
                 } else {

@@ -98,6 +98,8 @@ sourcePackage.overrideAttrs (old: {
   '';
   passthru = (old.passthru or { }) // {
     supportsLocalContext = true;
+    supportsModelContextOverrides = true;
+    supportsModelContextPresets = true;
     supportsResourceGuard = true;
     canonicalPackageLayout = 1;
   };

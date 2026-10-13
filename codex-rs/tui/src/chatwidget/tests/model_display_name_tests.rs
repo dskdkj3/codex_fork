@@ -4,6 +4,37 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn context_preset_picker_preserves_local_selection_and_fast_capability() {
+    let (mut chat, mut events, _ops) = make_chatwidget_manual(Some("gpt-6-astra")).await;
+    let mut base = get_available_model(&chat, "gpt-5.5");
+    base.id = "gpt-6-astra".to_string();
+    base.model = base.id.clone();
+    base.display_name = "GPT-6 Astra".to_string();
+    base.description = "Astra model".to_string();
+    let mut preset = base.clone();
+    preset.id = "long/gpt-6-astra".to_string();
+    preset.model = preset.id.clone();
+    preset.display_name = "GPT-6 Astra (Long context)".to_string();
+    chat.model_catalog = Arc::new(ModelCatalog::new(vec![base, preset.clone()]));
+    chat.open_all_models_popup();
+    assert_chatwidget_snapshot!(
+        "context_preset_model_picker",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+    chat.handle_key_event(KeyCode::Down.into());
+    chat.handle_key_event(KeyCode::Enter.into());
+    let selected =
+        assert_matches!(events.try_recv(), Ok(AppEvent::OpenReasoningPopup { model }) => model);
+    assert_eq!(selected, preset);
+    chat.set_model("long/gpt-6-astra");
+    assert_eq!(
+        chat.current_model_service_tier_commands().len(),
+        preset.service_tiers.len()
+    );
+    assert!(!chat.current_model_service_tier_commands().is_empty());
+}
+
+#[tokio::test]
 async fn custom_model_display_name_in_pickers_preserves_selection_slug() {
     let slug = "us.openai.gpt-5.6-luna";
     let (mut chat, mut events, _ops) = make_chatwidget_manual(Some(slug)).await;

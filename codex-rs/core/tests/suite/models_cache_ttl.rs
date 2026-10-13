@@ -619,6 +619,7 @@ struct ModelsCache {
 
 fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
     ModelInfo {
+        request_model: None,
         slug: slug.to_string(),
         display_name: "Remote Test".to_string(),
         description: Some("remote model".to_string()),

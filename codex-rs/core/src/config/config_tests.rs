@@ -234,6 +234,76 @@ async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn load_model_context_policy_without_static_catalog() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+        [model_context_overrides."test-astra"]
+        context_window = 800000
+        auto_compact_token_limit = 250000
+        [model_context_overrides."test-sol"]
+        auto_compact_token_limit = 190000
+        "#,
+    )
+    .unwrap();
+    let expected = config_toml.model_context_overrides.clone();
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        config.to_models_manager_config().model_context_overrides,
+        expected
+    );
+    assert_eq!(config.model_catalog, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_context_preset_rejects_invalid_identity() -> std::io::Result<()> {
+    for (id, display_name) in [
+        ("gpt-5.5", "Long"),
+        ("/gpt-5.5", "Long"),
+        ("long/", "Long"),
+        ("long/a/b", "Long"),
+        ("long/gpt-5.5", " "),
+    ] {
+        let codex_home = tempdir()?;
+        let mut config = ConfigToml::default();
+        config.model_context_presets.insert(
+            id.to_string(),
+            codex_protocol::ModelContextPreset {
+                display_name: display_name.to_string(),
+            },
+        );
+        let error = Config::load_from_base_config_with_overrides(
+            config,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid model context preset"));
+    }
+    Ok(())
+}
+
+#[test]
+fn model_context_policy_rejects_invalid_limits_and_capability_fields() {
+    for entry in [
+        "context_window = 0",
+        "auto_compact_token_limit = -1",
+        "auto_compact_token_limit = 1.5",
+        "service_tiers = []",
+    ] {
+        let config = format!("[model_context_overrides.\"test-sol\"]\n{entry}");
+        assert!(toml::from_str::<ConfigToml>(&config).is_err(), "{entry}");
+    }
+}
+
+#[tokio::test]
 async fn load_config_applies_optional_mcp_startup_grace() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     let config_toml: ConfigToml = toml::from_str("mcp_optional_startup_grace_ms = 2500")

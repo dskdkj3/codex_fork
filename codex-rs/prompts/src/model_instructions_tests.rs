@@ -9,6 +9,7 @@ use pretty_assertions::assert_eq;
 
 fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
     ModelInfo {
+        request_model: None,
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
         description: None,

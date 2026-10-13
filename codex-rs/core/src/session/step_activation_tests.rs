@@ -296,6 +296,7 @@ fn activation_models() -> Vec<ModelInfo> {
     [MODEL_A, MODEL_B]
         .into_iter()
         .map(|slug| ModelInfo {
+            request_model: None,
             slug: slug.to_string(),
             ..model.clone()
         })

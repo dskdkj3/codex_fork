@@ -17,7 +17,14 @@ pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
 const PERSONALITY_SECTION_HEADER: &str = "# Personality";
 
 pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
-    if let Some(context_window) = config.model_context_window {
+    let context_policy = config.model_context_overrides.get(&model.slug);
+    let base_policy = config.model_context_overrides.get(model.request_model());
+    if let Some(context_window) = config.model_context_window.or_else(|| {
+        context_policy
+            .and_then(|policy| policy.context_window)
+            .or_else(|| base_policy.and_then(|policy| policy.context_window))
+            .map(|value| i64::from(value.get()))
+    }) {
         model.context_window = Some(
             model
                 .max_context_window
@@ -26,7 +33,12 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
                 }),
         );
     }
-    if let Some(auto_compact_token_limit) = config.model_auto_compact_token_limit {
+    if let Some(auto_compact_token_limit) = config.model_auto_compact_token_limit.or_else(|| {
+        context_policy
+            .and_then(|policy| policy.auto_compact_token_limit)
+            .or_else(|| base_policy.and_then(|policy| policy.auto_compact_token_limit))
+            .map(|value| i64::from(value.get()))
+    }) {
         model.auto_compact_token_limit = Some(auto_compact_token_limit);
     }
     if let Some(token_limit) = config.tool_output_token_limit {
@@ -99,6 +111,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
     ModelInfo {
         slug: slug.to_string(),
+        request_model: None,
         display_name: slug.to_string(),
         description: None,
         default_reasoning_level: None,

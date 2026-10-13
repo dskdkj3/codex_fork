@@ -247,6 +247,8 @@ async fn new_config(
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        model_context_overrides: Default::default(),
+        model_context_presets: Default::default(),
         model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope::Total,
         model_post_turn_compact_threshold_percent: 0,
         model_provider_id,

@@ -410,6 +410,11 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian: Option<GuardianModelPolicy>,
     pub slug: String,
+    /// Provider model for a locally configured context preset. Never accepted from
+    /// remote catalog JSON; the selected slug remains the thread's model identity.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub request_model: Option<String>,
     pub display_name: String,
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -513,6 +518,10 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
+    pub fn request_model(&self) -> &str {
+        self.request_model.as_deref().unwrap_or(&self.slug)
+    }
+
     pub fn resolved_context_window(&self) -> Option<i64> {
         self.context_window.or(self.max_context_window)
     }
@@ -1053,6 +1062,7 @@ mod tests {
 
     pub(super) fn test_model(spec: Option<ModelMessages>) -> ModelInfo {
         ModelInfo {
+            request_model: None,
             slug: "test-model".to_string(),
             display_name: "Test Model".to_string(),
             description: None,

@@ -264,3 +264,69 @@ fn model_context_window_uses_model_value_without_override() {
 
     assert_eq!(updated, model);
 }
+
+#[test]
+fn model_context_policy_matches_exact_slug_and_preserves_capabilities() {
+    let config = ModelsManagerConfig {
+        model_context_overrides: serde_json::from_value(serde_json::json!({
+            "test-astra": {"context_window": 800_000, "auto_compact_token_limit": 250_000},
+            "test-sol": {"auto_compact_token_limit": 190_000}
+        }))
+        .unwrap(),
+        ..Default::default()
+    };
+
+    for slug in ["test-astra", "test-sol", "test-sol-next", "new-model"] {
+        let mut model = model_info_from_slug(slug);
+        model.context_window = Some(300_000);
+        model.max_context_window = Some(500_000);
+        model.auto_compact_token_limit = Some(270_000);
+        model.service_tiers = vec![codex_protocol::openai_models::ModelServiceTier {
+            id: "priority".to_string(),
+            name: "Fast".to_string(),
+            description: "Provider-owned capability".to_string(),
+        }];
+        let mut expected = model.clone();
+        match slug {
+            "test-astra" => {
+                expected.context_window = Some(500_000);
+                expected.auto_compact_token_limit = Some(250_000);
+            }
+            "test-sol" => expected.auto_compact_token_limit = Some(190_000),
+            "test-sol-next" | "new-model" => {}
+            _ => unreachable!(),
+        }
+        assert_eq!(with_config_overrides(model, &config), expected);
+    }
+}
+
+#[test]
+fn global_context_overrides_take_precedence_over_model_policy() {
+    let config = ModelsManagerConfig {
+        model_context_window: Some(200_000),
+        model_auto_compact_token_limit: Some(170_000),
+        model_context_overrides: serde_json::from_value(serde_json::json!({
+            "test-sol": {"context_window": 400_000, "auto_compact_token_limit": 350_000}
+        }))
+        .unwrap(),
+        ..Default::default()
+    };
+    let model = model_info_from_slug("test-sol");
+    let mut expected = model.clone();
+    expected.context_window = Some(200_000);
+    expected.auto_compact_token_limit = Some(170_000);
+    assert_eq!(with_config_overrides(model, &config), expected);
+}
+
+#[test]
+fn model_context_policy_retains_effective_compaction_cap() {
+    let config = ModelsManagerConfig {
+        model_context_overrides: serde_json::from_value(serde_json::json!({
+            "test-sol": {"context_window": 100_000, "auto_compact_token_limit": 150_000}
+        }))
+        .unwrap(),
+        ..Default::default()
+    };
+    let model = with_config_overrides(model_info_from_slug("test-sol"), &config);
+    assert_eq!(model.auto_compact_token_limit(), Some(90_000));
+}

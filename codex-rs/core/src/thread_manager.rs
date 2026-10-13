@@ -454,7 +454,7 @@ pub fn build_models_manager(
     manager.set_api_key_model_discovery_enabled(
         config.features.enabled(Feature::ApiKeyModelDiscovery),
     );
-    manager
+    codex_models_manager::with_context_presets(manager, config.model_context_presets.clone())
 }
 
 pub fn thread_store_from_config(

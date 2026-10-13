@@ -2186,8 +2186,11 @@ async fn auto_compact_starts_after_turn_started() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 }
 
+#[test_case::test_case("global"; "global_limit")]
+#[test_case::test_case("model"; "model_context_policy")]
+#[test_case::test_case("preset"; "model_context_preset")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
+async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit(policy: &'static str) {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
@@ -2196,11 +2199,33 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
     let over_limit_tokens = 250_000;
     let remote_summary = REMOTE_V2_SUMMARY;
 
-    let mut builder = test_codex().with_config(move |config| {
+    let configure = move |config: &mut Config| {
         set_test_compact_prompt(config);
-        config.model_auto_compact_token_limit = Some(limit);
-    });
-    let initial = builder.build(&server).await.unwrap();
+        if policy == "preset" {
+            config.model = Some("long/gpt-5.5".to_string());
+            config.model_context_presets.insert(
+                "long/gpt-5.5".to_string(),
+                codex_protocol::ModelContextPreset {
+                    display_name: "Long context".to_string(),
+                },
+            );
+        }
+        if policy != "global" {
+            config.model_context_overrides.insert(
+                config.model.clone().expect("test model is configured"),
+                codex_protocol::ModelContextOverride {
+                    auto_compact_token_limit: std::num::NonZeroU32::new(
+                        u32::try_from(limit).expect("positive test compact limit"),
+                    ),
+                    ..Default::default()
+                },
+            );
+        } else {
+            config.model_auto_compact_token_limit = Some(limit);
+        }
+    };
+    let mut builder = test_codex().with_config(configure);
+    let initial = builder.build(&server).await.expect("build initial thread");
 
     // A single over-limit completion should not auto-compact until the next user message.
     let initial_response = mount_sse_once(
@@ -2211,7 +2236,10 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
         ]),
     )
     .await;
-    initial.submit_turn("OVER_LIMIT_TURN").await.unwrap();
+    initial
+        .submit_turn("OVER_LIMIT_TURN")
+        .await
+        .expect("submit initial turn");
 
     let initial_requests = initial_response.requests();
     assert_eq!(initial_requests.len(), 1);
@@ -2222,11 +2250,16 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
         "remote compaction should not run before the next user message"
     );
 
-    let mut resume_builder = test_codex().with_config(move |config| {
-        set_test_compact_prompt(config);
-        config.model_auto_compact_token_limit = Some(limit);
-    });
-    let resumed = resume_builder.restart(&server, &initial).await.unwrap();
+    let mut resume_builder = test_codex().with_config(configure);
+    let resumed = resume_builder
+        .restart(&server, &initial)
+        .await
+        .expect("resume thread");
+    if policy == "preset" {
+        assert_eq!(initial.session_configured.model, "long/gpt-5.5");
+        assert_eq!(resumed.session_configured.model, "long/gpt-5.5");
+        assert_eq!(initial_requests[0].body_json()["model"], "gpt-5.5");
+    }
 
     let follow_up_user = "AFTER_RESUME_USER";
     let compact_turn = remote_v2_compaction_response();
@@ -2244,7 +2277,7 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
             resumed.session_configured.model.clone(),
         ))
         .await
-        .unwrap();
+        .expect("submit resumed turn");
 
     wait_for_event(&resumed.codex, |event| {
         matches!(event, EventMsg::ContextCompacted(_))
@@ -2256,6 +2289,11 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
     .await;
 
     let requests = response_mock.requests();
+    if policy == "preset" {
+        for request in &requests {
+            assert_eq!(request.body_json()["model"], "gpt-5.5");
+        }
+    }
     assert_eq!(
         requests.len(),
         2,
@@ -2270,6 +2308,96 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
     let follow_up_body = requests[1].body_json().to_string();
     assert!(follow_up_body.contains(follow_up_user));
     assert!(follow_up_body.contains(remote_summary));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_preset_switch_changes_compaction_limit_and_preserves_wire_model() {
+    skip_if_no_network!();
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_model("gpt-5.5")
+        .with_config(|config| {
+            set_test_compact_prompt(config);
+            config.model_context_overrides = serde_json::from_value(json!({
+                "gpt-5.5": {"auto_compact_token_limit": 100_000},
+                "long/gpt-5.5": {"auto_compact_token_limit": 300_000}
+            }))
+            .unwrap();
+            config.model_context_presets = serde_json::from_value(json!({
+                "long/gpt-5.5": {"display_name": "Long context"}
+            }))
+            .unwrap();
+        })
+        .build(&server)
+        .await
+        .unwrap();
+    let first_two = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", FIRST_REPLY),
+                ev_completed_with_tokens("r1", /*total_tokens*/ 150_000),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", "SECOND_REPLY"),
+                ev_completed_with_tokens("r2", /*total_tokens*/ 150_000),
+            ]),
+        ],
+    )
+    .await;
+    for model in ["gpt-5.5", "long/gpt-5.5"] {
+        test.codex
+            .start_or_steer_turn(disabled_permission_user_turn(
+                "continue",
+                test.cwd.path().to_path_buf(),
+                model.to_string(),
+            ))
+            .await
+            .unwrap();
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    let requests = first_two.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.body_json()["model"], "gpt-5.5");
+        assert!(request.inputs_of_type("compaction_trigger").is_empty());
+    }
+    let switched_back = mount_sse_sequence(
+        &server,
+        vec![
+            remote_v2_compaction_response(),
+            sse(vec![
+                ev_assistant_message("m3", FINAL_REPLY),
+                ev_completed("r3"),
+            ]),
+        ],
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(disabled_permission_user_turn(
+            "back to standard",
+            test.cwd.path().to_path_buf(),
+            "gpt-5.5".to_string(),
+        ))
+        .await
+        .unwrap();
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ContextCompacted(_))
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = switched_back.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].inputs_of_type("compaction_trigger").len(), 1);
+    for request in &requests {
+        assert_eq!(request.body_json()["model"], "gpt-5.5");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

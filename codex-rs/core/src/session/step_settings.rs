@@ -178,6 +178,10 @@ impl ResolvedStepSettings {
 pub(crate) struct ModelInfoOverrides {
     pub(crate) context_window: Option<i64>,
     pub(crate) auto_compact_token_limit: Option<i64>,
+    pub(crate) model_context_overrides:
+        std::collections::BTreeMap<String, codex_protocol::ModelContextOverride>,
+    pub(crate) model_context_presets:
+        std::collections::BTreeMap<String, codex_protocol::ModelContextPreset>,
     pub(crate) tool_output_token_limit: Option<usize>,
     pub(crate) base_instructions: Option<String>,
 }
@@ -187,6 +191,8 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
         Self {
             context_window: config.model_context_window,
             auto_compact_token_limit: config.model_auto_compact_token_limit,
+            model_context_overrides: config.model_context_overrides,
+            model_context_presets: config.model_context_presets,
             tool_output_token_limit: config.tool_output_token_limit,
             base_instructions: config.base_instructions,
         }
@@ -201,6 +207,8 @@ impl ModelInfoOverrides {
         ModelsManagerConfig {
             model_context_window: self.context_window,
             model_auto_compact_token_limit: self.auto_compact_token_limit,
+            model_context_overrides: self.model_context_overrides.clone(),
+            model_context_presets: self.model_context_presets.clone(),
             tool_output_token_limit: self.tool_output_token_limit,
             base_instructions: self.base_instructions.clone(),
             personality,
