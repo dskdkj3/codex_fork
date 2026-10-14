@@ -1,5 +1,7 @@
 {
   sourcePackage,
+  buildCommit,
+  callPackage,
   lib,
   fetchurl,
   python3,
@@ -9,6 +11,8 @@
   ncurses,
   llvmPackages,
   stdenv,
+  alsa-lib,
+  patchelf,
 }:
 let
   target = "x86_64-unknown-linux-gnu";
@@ -38,8 +42,10 @@ let
   };
   lock = builtins.fromTOML (builtins.readFile ../codex-rs/Cargo.lock);
   lockedV8 = builtins.filter (package: package.name == "v8") lock.package;
+  voiceRuntime = callPackage ./voice-runtime.nix { inherit buildCommit; };
 in
 assert stdenv.hostPlatform.system == "x86_64-linux";
+assert buildCommit != null && builtins.match "[0-9a-f]{40}" buildCommit != null;
 assert builtins.length lockedV8 == 1 && (builtins.head lockedV8).version == v8Version;
 sourcePackage.overrideAttrs (old: {
   # Keep package scripts and all compile-time resources beside the Rust tree.
@@ -50,12 +56,15 @@ sourcePackage.overrideAttrs (old: {
   nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
     python3
     autoPatchelfHook
+    patchelf
   ];
   buildInputs = (old.buildInputs or [ ]) ++ [
     openssl
     libcap
     ncurses
     stdenv.cc.cc.libgcc
+    alsa-lib
+    voiceRuntime.dev
   ];
   env = (old.env or { }) // {
     RUSTY_V8_ARCHIVE = v8Archive;
@@ -71,6 +80,13 @@ sourcePackage.overrideAttrs (old: {
     # or it passes GNU-only assembler flags to Clang's integrated assembler.
     AWS_LC_SYS_HOST_CC = "${llvmPackages.clang}/bin/clang";
     AWS_LC_SYS_HOST_CXX = "${llvmPackages.clang}/bin/clang++";
+    STABLE_GIT_COMMIT = buildCommit;
+    CODEX_BUILD_COMMIT = buildCommit;
+    PKG_CONFIG_PATH = lib.concatStringsSep ":" [
+      "${voiceRuntime.dev}/lib/pkgconfig"
+      "${alsa-lib.dev}/lib/pkgconfig"
+      (old.env.PKG_CONFIG_PATH or "")
+    ];
   };
   cargoBuildFlags = [
     "--bin"
@@ -79,6 +95,8 @@ sourcePackage.overrideAttrs (old: {
     "codex-code-mode-host"
     "--bin"
     "bwrap"
+    "--bin"
+    "codex-voice-host"
   ];
   installPhase = ''
     runHook preInstall
@@ -96,11 +114,44 @@ sourcePackage.overrideAttrs (old: {
       --rg-bin "$TMPDIR/codex-rg-resource/${rgSpec.path}"
     runHook postInstall
   '';
+  # Assemble after the normal ELF fixups/stripping so upstream's receipts hash
+  # the final files. Keep media libraries physical and package-relative: the
+  # helper rejects symlinked runtime files and never scans system plugins.
+  # postFixup itself runs before dependency postFixupHooks. Register our
+  # assembler last during preFixup, after autoPatchelfHook's registration.
+  preFixup = (old.preFixup or "") + ''
+    postFixupHooks+=(assembleCodexVoice)
+    assembleCodexVoice() {
+    voice_helper="$TMPDIR/codex-voice-host"
+    install -m755 "target/${target}/release/codex-voice-host" "$voice_helper"
+    strip --strip-debug "$voice_helper"
+    patchelf --set-rpath '$ORIGIN/../lib:${
+      lib.makeLibraryPath [
+        alsa-lib
+        stdenv.cc.cc.libgcc
+        stdenv.cc.libc
+      ]
+    }' "$voice_helper"
+    python3 ../third_party/voice/release_runtime.py stage \
+      --target ${target} --source ${voiceRuntime} --output "$TMPDIR/voice-runtime"
+    python3 ../third_party/voice/release_runtime.py seal \
+      --target ${target} --output "$TMPDIR/voice-runtime"
+    python3 ../third_party/voice/assemble_package.py \
+      --package "$out" --helper "$voice_helper" --voice-target ${target} \
+      --build-commit ${lib.escapeShellArg buildCommit} \
+      --release-version ${lib.escapeShellArg old.version} \
+      --runtime "$TMPDIR/voice-runtime" --output "$TMPDIR/codex-with-voice"
+    cp -a "$TMPDIR/codex-with-voice/codex-resources/voice" "$out/codex-resources/voice"
+    python3 ../nix/check-voice-package.py "$out"
+    }
+  '';
   passthru = (old.passthru or { }) // {
     supportsLocalContext = true;
     supportsModelContextOverrides = true;
     supportsModelContextPresets = true;
     supportsResourceGuard = true;
     canonicalPackageLayout = 1;
+    supportsVoice = true;
+    inherit voiceRuntime buildCommit;
   };
 })

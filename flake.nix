@@ -50,10 +50,17 @@
               rustc = pkgs.rust-bin.stable."1.97.1".minimal;
             };
           };
+          buildCommit =
+            if self ? rev then
+              self.rev
+            else if self ? dirtyRev then
+              nixpkgs.lib.removeSuffix "-dirty" self.dirtyRev
+            else
+              null;
           codex-rs =
             if system == "x86_64-linux" then
               pkgs.callPackage ./nix/local-package.nix {
-                inherit sourcePackage;
+                inherit sourcePackage buildCommit;
               }
             else
               sourcePackage;
@@ -63,6 +70,16 @@
           default = codex-rs;
         }
       );
+
+      checks.x86_64-linux.voice-package =
+        let
+          pkgs = import nixpkgs { system = "x86_64-linux"; };
+          package = self.packages.x86_64-linux.default;
+        in
+        pkgs.runCommand "codex-voice-package-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 ${./nix/check-voice-package.py} ${package}
+          touch "$out"
+        '';
 
       devShells = forAllSystems (
         system:
